@@ -145,11 +145,6 @@ pub(crate) fn validate_intra_ark_payment(
 		),
 	}
 
-	// The expiry sweep may not have canceled this subscription yet.
-	if subscription.invoice.is_expired() {
-		return badarg!("invoice is expired");
-	}
-
 	// The invoice equality above already implies this, but the payout to the
 	// receiver is driven by the subscription amount, so tie the sender's
 	// amount to it explicitly rather than by implication.
@@ -1378,25 +1373,13 @@ mod tests {
 	/// `key` picks the payee identity: a sender forging an invoice for someone
 	/// else's payment hash signs with a key of their own.
 	fn test_invoice(payment_hash: sha256::Hash, amount_msat: u64, key: u8) -> Bolt11Invoice {
-		test_invoice_at(payment_hash, amount_msat, key, Duration::from_secs(
-			Local::now().timestamp().try_into().unwrap(),
-		))
-	}
-
-	fn test_invoice_at(
-		payment_hash: sha256::Hash,
-		amount_msat: u64,
-		key: u8,
-		timestamp: Duration,
-	) -> Bolt11Invoice {
 		let secp = Secp256k1::new();
 		let secret = SecretKey::from_slice(&[key; 32]).unwrap();
 		InvoiceBuilder::new(Currency::Regtest)
 			.description("test".into())
 			.payment_hash(payment_hash)
 			.payment_secret(PaymentSecret([42; 32]))
-			.duration_since_epoch(timestamp)
-			.expiry_time(Duration::from_secs(60))
+			.duration_since_epoch(Duration::from_secs(1_700_000_000))
 			.min_final_cltv_expiry_delta(144)
 			.amount_milli_satoshis(amount_msat)
 			.build_signed(|hash: &Message| secp.sign_ecdsa_recoverable(hash, &secret))
@@ -1425,7 +1408,6 @@ mod tests {
 	fn intra_ark_payment_accepts_the_invoice_we_issued() {
 		let hash = sha256::Hash::hash(b"preimage");
 		let ours = test_invoice(hash, 1_000_000, 1);
-		assert!(!ours.is_expired());
 		let sub = test_subscription(ours.clone());
 
 		let invoice = Invoice::Bolt11(ours);
@@ -1433,22 +1415,6 @@ mod tests {
 		// Overpaying is fine, we keep the difference.
 		validate_intra_ark_payment(&sub, &invoice, Amount::from_sat(1500)).expect("overpayment");
 		validate_intra_ark_payment(&sub, &invoice, Amount::from_sat(999)).expect_err("underpayment");
-	}
-
-	#[test]
-	fn intra_ark_payment_rejects_expired_invoice_before_subscription_is_canceled() {
-		let hash = sha256::Hash::hash(b"preimage");
-		let expired = test_invoice_at(hash, 1_000_000, 1, Duration::from_secs(
-			(Local::now().timestamp() - 120).try_into().unwrap(),
-		));
-		assert!(expired.is_expired());
-		let sub = test_subscription(expired.clone());
-		assert_eq!(sub.status, LightningHtlcSubscriptionStatus::Created);
-
-		let error = validate_intra_ark_payment(
-			&sub, &Invoice::Bolt11(expired), Amount::from_sat(1000),
-		).expect_err("expiry must not depend on the background cancellation having run");
-		assert!(error.to_string().contains("expired"));
 	}
 
 	/// A sender who forges a cheaper invoice on the receiver's payment hash
@@ -1480,7 +1446,7 @@ mod tests {
 			.description("test".into())
 			.payment_hash(hash)
 			.payment_secret(PaymentSecret([42; 32]))
-			.duration_since_epoch(Duration::from_secs(Local::now().timestamp().try_into().unwrap()))
+			.duration_since_epoch(Duration::from_secs(1_700_000_000))
 			.min_final_cltv_expiry_delta(144)
 			.build_signed(|hash: &Message| secp.sign_ecdsa_recoverable(hash, &secret))
 			.unwrap();

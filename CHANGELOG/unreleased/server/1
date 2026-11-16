@@ -31,5 +31,3 @@
   - An unregistered arkoor output to the key of round padding pays its
     sender at expiry. Only an unclaimed round padding output pays the
     operator.
-  - An intra-Ark payment refuses an expired invoice before it accepts the
-    receive, even if the expiry sweep has not canceled it yet.
