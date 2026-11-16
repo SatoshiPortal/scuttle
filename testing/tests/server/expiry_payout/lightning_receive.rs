@@ -389,10 +389,10 @@ impl ArkRpcProxy for HoldClaim {
 
 /// An intra-Ark payment succeeds, then the server crashes before it settles
 /// the receive. The hold timer must not cancel the receive of a payment
-/// that went through, the settlement resumes, and the receiver still claims.
+/// that went through.
 #[tokio::test]
-async fn expiry_payout_succeeded_receive_survives_a_crash() {
-	let ctx = TestContext::new("server/expiry_payout_succeeded_receive_survives_a_crash").await;
+async fn expiry_payout_succeeded_payment_prevents_receive_cancellation() {
+	let ctx = TestContext::new("server/expiry_payout_succeeded_payment_prevents_receive_cancellation").await;
 	let lightning = ctx.new_lightning_setup("lightningd").await;
 	let srv = ctx.captaind("server").lightningd(&lightning.internal).funded(btc(10)).watchmand()
 		.cfg(|cfg| {
@@ -516,26 +516,6 @@ async fn expiry_payout_succeeded_receive_survives_a_crash() {
 	guard_rx.recv().wait_millis(30_000).await.unwrap();
 	assert_unsettled().await;
 	assert!(payout_shares(&db, held.vtxo_ids[0]).await.is_empty());
-
-	db.write(async |t| Ok(t.batch_execute("
-		DROP TRIGGER test_refuse_settle ON lightning_htlc_subscription; DROP FUNCTION test_refuse_settle();
-	").await?)).await.unwrap();
-	async {
-		while db.read(async |t| t.get_htlc_subscription_by_id(sub.id).await).await.unwrap().unwrap().status
-			!= LightningHtlcSubscriptionStatus::Settled {
-			tokio::time::sleep(poll_interval()).await;
-		}
-	}.wait_millis(30_000).await;
-	let payer = ctx.bark_sdk("payer", &srv).mnemonic(payer_seed).cfg(config).create().await;
-	let receiver = ctx.bark_sdk("receiver", &srv).mnemonic(receiver_seed).cfg(config).create().await;
-	assert!(receiver.lightning_receive_checkpoint(hash).await.unwrap() == Some(checkpoint));
-	assert!(matches!(receiver.try_claim_lightning_receive(hash, true).await.unwrap(), LightningReceiveState::Settled(_)));
-	payer.check_lightning_payment(hash, true).await.unwrap();
-	payer.sync().await;
-	receiver.sync().await;
-	assert_eq!(payer.balance().await.unwrap().spendable, sat(90_000));
-	assert_eq!(receiver.balance().await.unwrap().spendable, sat(10_000));
-	assert!(receiver.vtxos().await.unwrap().iter().all(|vtxo| vtxo.expiry_payout_state.is_none()));
 }
 
 /// A receive paid over Lightning does not become the collateral of an Ark

@@ -217,9 +217,7 @@ impl<'t> Tx<'t> {
 	/// Get the payment attempt initiated against the given htlc
 	/// subscription that is open or succeeded.
 	///
-	/// Unlike [Self::get_open_lightning_payment_attempt_by_subscription_id],
-	/// this also finds the attempt after it succeeded, so a receive whose
-	/// settlement a restart interrupted is still an intra-Ark payment.
+	/// The expiry payout cancellation guard must also find succeeded attempts.
 	pub async fn get_lightning_payment_attempt_by_subscription_id(
 		&self,
 		lightning_htlc_subscription_id: i64,
