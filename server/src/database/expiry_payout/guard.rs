@@ -1,12 +1,16 @@
 //! Guards between expiry payout decisions and the writes that spend the
 //! same VTXOs. A stored decision makes every later spend of its VTXOs fail.
 
+use std::collections::{HashMap, HashSet};
+
 use anyhow::Context;
+use bitcoin::consensus::serialize;
 use chrono::{DateTime, Local};
 use tokio_postgres::Row;
 
-use ark::VtxoId;
+use ark::{ProtocolEncoding, Vtxo, VtxoId};
 use ark::tree::signed::{CachedSignedVtxoTree, UnlockHash};
+use ark::vtxo::Full;
 
 use crate::database::Tx;
 use crate::error::ExpiryPayoutRefusal;
@@ -33,6 +37,42 @@ impl Tx<'_> {
 			return Err(ExpiryPayoutRefusal::DecidedForPayout(row.get::<_, &str>("vtxo_id").parse()?).into());
 		}
 		Ok(())
+	}
+
+	/// A decided VTXO may be re-registered without writing only when its
+	/// signed chain is already stored and its forfeit was committed in the
+	/// round that spent it. Called after guard_spend_changes locked the whole
+	/// registration batch; a new or unfinished registration still meets the
+	/// ordinary guard on retry.
+	pub(crate) async fn completed_round_registration_replays(
+		&self, vtxos: &[Vtxo<Full>],
+	) -> anyhow::Result<HashSet<VtxoId>> {
+		let ids = vtxos.iter().map(|v| v.id().to_string()).collect::<Vec<_>>();
+		let rows = self.query("SELECT v.vtxo_id,v.vtxo FROM vtxo v \
+			JOIN round r ON r.id=v.spent_in_round \
+			WHERE v.vtxo_id=ANY($1) AND v.spend_state='spent' AND v.oor_spent_txid IS NOT NULL \
+			AND EXISTS (SELECT 1 FROM round_part_input i \
+				JOIN round_participation p ON p.id=i.participation_id \
+				WHERE i.vtxo_id=v.vtxo_id AND p.round_id=r.funding_txid \
+					AND i.signed_forfeit_tx IS NOT NULL AND p.forfeited_at IS NOT NULL) \
+			AND (EXISTS (SELECT 1 FROM expiry_payout_vtxo c WHERE c.vtxo_id=v.vtxo_id) \
+				OR EXISTS (SELECT 1 FROM expiry_payout_input i WHERE i.vtxo_id=v.vtxo_id))",
+			&[&ids]).await?;
+		let stored = rows.into_iter().map(|row| (
+			row.get::<_, String>("vtxo_id"), row.get::<_, Vec<u8>>("vtxo"),
+		)).collect::<HashMap<_, _>>();
+		if stored.is_empty() { return Ok(HashSet::new()); }
+		let txids = vtxos.iter().flat_map(|v| v.transactions())
+			.map(|item| item.tx.compute_txid().to_string()).collect::<Vec<_>>();
+		let signed_txs = self.query("SELECT txid,signed_tx FROM virtual_transaction WHERE txid=ANY($1)",
+			&[&txids]).await?.into_iter().filter_map(|row| {
+			Some((row.get::<_, String>("txid"), row.get::<_, Option<Vec<u8>>>("signed_tx")?))
+		}).collect::<HashMap<_, _>>();
+		Ok(vtxos.iter().filter(|v| stored.get(&v.id().to_string()).is_some_and(|bytes| {
+			bytes == &v.serialize()
+				&& v.transactions().all(|item| signed_txs.get(&item.tx.compute_txid().to_string())
+					.is_some_and(|tx| tx == &serialize(&item.tx)))
+		})).map(Vtxo::id).collect())
 	}
 
 	/// Refuse a change to a round participation that an expiry payout

@@ -26,9 +26,54 @@ use ark_testing::exit::progress_exit_until_awaiting_delta;
 use ark_testing::util::{poll_interval, FutureExt};
 
 use super::{
-	current_share, fund_watchman, mine, mine_past, payout_output, payout_shares, wait_for_query_lock,
+	current_share, decide_for_payout, fund_watchman, mine, mine_past, payout_output, payout_shares, wait_for_query_lock,
 	wait_payout,
 };
+
+/// A completed refresh can retry registration of its old input after an
+/// expiry decision. The server already has its signed chain and forfeits;
+/// registration must neither change the decided VTXO nor accept an
+/// unfinished forfeit as a replay.
+#[tokio::test]
+async fn expiry_payout_completed_round_registration_replay_is_read_only() {
+	let ctx = TestContext::new("server/expiry_payout_completed_round_registration_replay_is_read_only").await;
+	let srv = ctx.captaind("server").funded(btc(1)).no_vtxo_pool()
+		.cfg(|cfg| cfg.expiry_payouts = true).create().await;
+	let wallet = ctx.bark("wallet", &srv).funded(sat(500_000)).create().await;
+	let inputs = wallet.board_and_confirm_and_register(&ctx, sat(200_000)).await;
+	assert_eq!(inputs.len(), 1);
+	let db = Db::connect(&srv.config().postgres).await.unwrap();
+	let input = db.read(async |t| t.get_user_vtxo_by_id(inputs[0]).await).await.unwrap().vtxo;
+	ctx.refresh_all(&srv, &[&wallet]).await;
+	let id = input.id().to_string();
+	let part = db.read(async |t| Ok(t.query_one("SELECT p.id FROM vtxo v \
+		JOIN round r ON r.id=v.spent_in_round \
+		JOIN round_participation p ON p.round_id=r.funding_txid \
+		JOIN round_part_input i ON i.participation_id=p.id AND i.vtxo_id=v.vtxo_id \
+		WHERE v.vtxo_id=$1 AND v.spend_state='spent' AND v.oor_spent_txid IS NOT NULL \
+			AND p.forfeited_at IS NOT NULL AND i.signed_forfeit_tx IS NOT NULL",
+		&[&id]).await?.get::<_, i64>(0))).await.unwrap();
+	db.write(async |t| decide_for_payout(t, std::slice::from_ref(&id)).await).await.unwrap();
+	let snapshot = async || db.read(async |t| {
+		let row = t.query_one("SELECT vtxo,xmin::text,updated_at FROM vtxo WHERE vtxo_id=$1", &[&id]).await?;
+		Ok((row.get::<_, Vec<u8>>(0), row.get::<_, String>(1),
+			row.get::<_, chrono::DateTime<chrono::Local>>(2)))
+	}).await.unwrap();
+	let before = snapshot().await;
+	let mut rpc = srv.get_public_rpc().await;
+	let request = protos::RegisterVtxoTransactionsRequest { vtxos: vec![input.serialize()] };
+
+	db.write(async |t| Ok(t.execute("UPDATE round_participation SET forfeited_at=NULL WHERE id=$1",
+		&[&part]).await?)).await.unwrap();
+	let refused = rpc.register_vtxo_transactions(request.clone()).await.unwrap_err();
+	assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+	db.write(async |t| Ok(t.execute("UPDATE round_participation SET forfeited_at=NOW() WHERE id=$1",
+		&[&part]).await?)).await.unwrap();
+
+	rpc.register_vtxo_transactions(request.clone()).await.expect("completed-round replay");
+	rpc.register_vtxo_transactions(request).await.expect("repeated replay");
+	assert_eq!(snapshot().await, before, "registration replay changed the decided VTXO");
+}
 
 /// Loses the reply to a finished offboard, so the client never broadcasts it.
 #[derive(Clone)]
