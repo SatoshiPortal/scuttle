@@ -147,7 +147,8 @@ async fn expiry_payout_arkoor_mailbox_binding_is_immutable() {
 
 	let mut changed = request.clone();
 	bind_outputs(&srv, &mut changed, &recipient, other_mailbox).await;
-	assert!(rpc.request_arkoor_cosign(changed).await.is_err());
+	let error = rpc.request_arkoor_cosign(changed).await.unwrap_err();
+	assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{error}");
 	assert_eq!(stored_rows(&db, &ids).await, committed);
 
 	// A client that lost the reply sends the same request again.

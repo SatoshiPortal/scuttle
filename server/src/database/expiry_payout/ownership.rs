@@ -35,6 +35,20 @@ impl fmt::Display for OwnerBindingMismatch {
 
 impl std::error::Error for OwnerBindingMismatch {}
 
+/// A replay tried to change the owner mailbox of an existing VTXO.
+/// The original binding remains in place. This is a precondition failure
+/// rather than a terminal bad argument because a co-sign reply may be lost.
+#[derive(Debug)]
+pub struct StoredMailboxConflict(pub VtxoId);
+
+impl fmt::Display for StoredMailboxConflict {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "owner VTXO {} has a conflicting mailbox binding", self.0)
+	}
+}
+
+impl std::error::Error for StoredMailboxConflict {}
+
 impl Tx<'_> {
 	/// The owner mailbox recorded for each VTXO when it was created. The
 	/// VTXO ids that a mailbox holder stores for recovery are not in it.
@@ -84,7 +98,9 @@ impl Tx<'_> {
 			ON CONFLICT (vtxo_id) DO NOTHING", &[&ids, &mailboxes]).await?;
 		let stored = self.vtxo_owner_mailboxes(owned).await?;
 		for id in owned {
-			ensure!(stored.get(id) == bindings.get(id), "owner VTXO {id} has a conflicting mailbox binding");
+			if stored.get(id) != bindings.get(id) {
+				return Err(StoredMailboxConflict(*id).into());
+			}
 		}
 		Ok(())
 	}

@@ -26,6 +26,7 @@ use ::ark::VtxoId;
 use server_rpc::{pver, RequestExt, IN_FLIGHT_INPUTS_METADATA_KEY};
 
 use crate::error::{BadArgument, ExpiryPayoutRefusal, InFlightInputs, NotFound, Unavailable, UnusableInputs};
+use crate::database::expiry_payout::ownership::StoredMailboxConflict;
 
 
 /// The minimum protocol version supported by the server.
@@ -123,6 +124,8 @@ impl ToStatus for anyhow::Error {
 			tonic::Status::with_metadata(tonic::Code::InvalidArgument, format!("{:#}", self), metadata)
 		} else if let Some(_) = self.downcast_ref::<Unavailable>() {
 			tonic::Status::unavailable(format!("{:#}", self))
+		} else if self.downcast_ref::<StoredMailboxConflict>().is_some() {
+			tonic::Status::failed_precondition(format!("{:#}", self))
 		} else if let Some(_) = self.downcast_ref::<BadArgument>() {
 			tonic::Status::invalid_argument(format!("{:#}", self))
 		} else {
@@ -251,6 +254,16 @@ mod test {
 	use ::ark::test_util::VTXO_VECTORS;
 	use ::ark::tree::signed::UnlockHash;
 	use bitcoin::hashes::Hash;
+	use server_rpc::StatusExt;
+
+	#[test]
+	fn stored_mailbox_conflict_does_not_abort_a_lost_cosign_reply() {
+		let id = VTXO_VECTORS.board_vtxo.id();
+		let status = anyhow::Error::new(StoredMailboxConflict(id))
+			.context("arkoor co-sign failed").to_status();
+		assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+		assert!(!status.is_rejection());
+	}
 
 	#[test]
 	fn cancelled_round_metadata_binds_requested_hash_through_error_context() {
