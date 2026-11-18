@@ -155,12 +155,15 @@ impl Tx<'_> {
 		Ok((snapshot, ExpiryBranchState { rows, parts, attempts }))
 	}
 
-	/// `None` if the VTXO was never decided, else whether a new decision
-	/// can take it: every expiry payout that holds it has conflicted.
-	async fn earlier_decision_free(&self, id: VtxoId) -> anyhow::Result<Option<bool>> {
-		Ok(self.query_opt("SELECT BOOL_AND(a.status='conflicted') AS free FROM expiry_payout_vtxo c \
-			JOIN v_expiry_payout_state a ON a.id=c.expiry_payout_id WHERE c.vtxo_id=$1 HAVING COUNT(*)>0",
-			&[&id.to_string()]).await?.map(|row| row.get("free")))
+	/// For each previously decided VTXO, whether all its payouts have
+	/// conflicted. Read the payout-state view once for the whole branch.
+	async fn earlier_decisions_free(&self, ids: &[VtxoId]) -> anyhow::Result<BTreeMap<VtxoId, bool>> {
+		let ids = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+		self.query("SELECT c.vtxo_id,BOOL_AND(a.status='conflicted') AS free \
+			FROM expiry_payout_vtxo c JOIN v_expiry_payout_state a ON a.id=c.expiry_payout_id \
+			WHERE c.vtxo_id=ANY($1) GROUP BY c.vtxo_id", &[&ids]).await?
+			.into_iter().map(|row| Ok((row.get::<_, &str>("vtxo_id").parse()?, row.get("free"))))
+			.collect()
 	}
 
 	/// Plan the payout of a root in one consistent read, without locks.
@@ -176,6 +179,7 @@ impl Tx<'_> {
 			&[&root.id().to_string(), &i32::try_from(view.height.to_u32())?]).await?;
 		if current.is_none() { return Ok(None); }
 		let snapshot = self.expired_tree_snapshot(std::slice::from_ref(&root)).await?;
+		let earlier = self.earlier_decisions_free(&snapshot.iter().map(|f| f.state.vtxo_id).collect::<Vec<_>>()).await?;
 		let mut vtxos = Vec::new();
 		let mut valid = true;
 		for fact in &snapshot {
@@ -198,8 +202,8 @@ impl Tx<'_> {
 				valid = false;
 				continue;
 			}
-			if let Some(free) = self.earlier_decision_free(ownership.id).await? {
-				valid &= free;
+			if let Some(free) = earlier.get(&ownership.id).copied() {
+				if !free { return Ok(None); }
 				decided.insert(ownership.id);
 			}
 			vtxos.push(ownership);
@@ -250,8 +254,9 @@ impl Tx<'_> {
 					"expiry lightning facts changed during analysis");
 			}
 		}
+		let earlier = self.earlier_decisions_free(&vtxos.iter().map(|v| v.id).collect::<Vec<_>>()).await?;
 		for vtxo in &vtxos {
-			ensure!(self.earlier_decision_free(vtxo.id).await? == decided.contains(&vtxo.id).then_some(true),
+			ensure!(earlier.get(&vtxo.id).copied() == decided.contains(&vtxo.id).then_some(true),
 				"earlier expiry decision changed during analysis");
 		}
 		// Each owner pays one fee for this root, even if other trees expire
