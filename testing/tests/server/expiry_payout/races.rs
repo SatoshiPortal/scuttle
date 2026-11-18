@@ -45,6 +45,8 @@ async fn expiry_payout_completed_round_registration_replay_is_read_only() {
 	let db = Db::connect(&srv.config().postgres).await.unwrap();
 	let input = db.read(async |t| t.get_user_vtxo_by_id(inputs[0]).await).await.unwrap().vtxo;
 	ctx.refresh_all(&srv, &[&wallet]).await;
+	ctx.generate_blocks(ROUND_CONFIRMATIONS).await;
+	wallet.sync().await;
 	let id = input.id().to_string();
 	let part = db.read(async |t| Ok(t.query_one("SELECT p.id FROM vtxo v \
 		JOIN round r ON r.id=v.spent_in_round \
