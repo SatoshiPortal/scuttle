@@ -50,7 +50,7 @@ use crate::persist::models::{
 use crate::movement::{Movement, MovementId, MovementStatus, MovementSubsystem, PaymentMethod};
 use crate::movement::update::MovementUpdate;
 use crate::round::RoundState;
-use crate::vtxo::{VtxoLockHolder, VtxoState, VtxoStateKind, WalletVtxo};
+use crate::vtxo::{ExpiryPayoutState, VtxoLockHolder, VtxoState, VtxoStateKind, WalletVtxo};
 
 /// Storage interface for Bark wallets.
 ///
@@ -168,6 +168,19 @@ pub trait BarkPersister: Send + Sync + 'static {
 	/// Errors:
 	/// - Returns an error if the update fails.
 	async fn set_server_mailbox_pubkey(&self, server_mailbox_pubkey: PublicKey) -> anyhow::Result<()>;
+
+	/// Set the public key of the wallet's mailbox keypair in wallet properties.
+	///
+	/// The wallet stores it when it first connects to a server in expiry
+	/// payout mode. Once set, the wallet refuses to open with another
+	/// mailbox keypair.
+	///
+	/// Parameters:
+	/// - mailbox_pubkey: The public key of the wallet's mailbox keypair.
+	///
+	/// Errors:
+	/// - Returns an error if the update fails or another key is set.
+	async fn set_mailbox_key(&self, mailbox_pubkey: PublicKey) -> anyhow::Result<()>;
 
 	/// Creates a new movement in the given state, ready to be updated.
 	///
@@ -681,6 +694,22 @@ pub trait BarkPersister: Send + Sync + 'static {
 		vtxo_id: VtxoId,
 		new_state: VtxoState,
 		allowed_old_states: &[VtxoStateKind],
+	) -> anyhow::Result<WalletVtxo>;
+
+	/// Record the expiry payout state that the server reports for a VTXO.
+	///
+	/// The server does not accept a VTXO that it pays out, so the VTXO
+	/// becomes [VtxoState::Spent], unless it is [VtxoState::Exited].
+	///
+	/// Returns:
+	/// - `Ok(WalletVtxo)` with the updated VTXO.
+	///
+	/// Errors:
+	/// - Returns an error if the VTXO is not stored or the update fails.
+	async fn set_vtxo_expiry_payout_state(
+		&self,
+		vtxo_id: VtxoId,
+		payout_state: ExpiryPayoutState,
 	) -> anyhow::Result<WalletVtxo>;
 
 	/// Release `holder`'s lock on the given vtxo, transitioning it to

@@ -49,7 +49,7 @@ async fn register_vtxo_transactions_accepts_duplicate_ids() {
 /// the server keeps the resulting vtxos `unregistered` and holds their
 /// transactions unsigned.
 #[derive(Clone)]
-struct DropRegistration;
+pub(crate) struct DropRegistration;
 
 #[async_trait::async_trait]
 impl captaind::proxy::ArkRpcProxy for DropRegistration {
@@ -282,6 +282,7 @@ async fn board_output_is_bound_to_one_exit_tx() {
 			user.public_key(), expiry, info.server_pubkey, info.vtxo_exit_delta,
 		).unwrap().set_funding_details(amount, fee, utxo).unwrap().generate_user_nonces();
 		let resp = srv.get_public_rpc().await.request_board_cosign(protos::BoardCosignRequest {
+			owner_mailbox: None,
 			amount: amount.to_sat(),
 			utxo: utxo.serialize(),
 			expiry_height: expiry.to_u32(),

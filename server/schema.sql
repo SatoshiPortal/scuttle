@@ -500,6 +500,40 @@ $$;
 
 
 --
+-- Name: preserve_vtxo_owner_mailbox(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.preserve_vtxo_owner_mailbox() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+	RAISE EXCEPTION 'VTXO owner mailbox bindings are immutable'
+		USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$;
+
+
+--
+-- Name: require_vtxo_owner_mailbox(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_vtxo_owner_mailbox() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+	payouts BOOLEAN;
+BEGIN
+	SELECT expiry_payouts INTO STRICT payouts FROM server_mode WHERE id = 1;
+	IF payouts AND NOT EXISTS (SELECT 1 FROM vtxo_owner_mailbox WHERE vtxo_id = NEW.vtxo_id) THEN
+		RAISE EXCEPTION 'VTXO % has no owner mailbox', NEW.vtxo_id
+			USING ERRCODE = 'foreign_key_violation', CONSTRAINT = 'vtxo_require_owner_mailbox';
+	END IF;
+	RETURN NULL;
+END;
+$$;
+
+
+--
 -- Name: virtual_transaction_history_trigger(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -549,6 +583,15 @@ CREATE FUNCTION public.vtxo_late_sweeps(chain_tip integer, margin integer DEFAUL
     WHERE NOT conflicted
       AND expiry + margin <= chain_tip;
 $$;
+
+
+--
+-- Name: vtxo_requires_owner_mailbox(public.spend_state, bytea); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.vtxo_requires_owner_mailbox(state public.spend_state, policy bytea) RETURNS boolean
+    LANGUAGE sql IMMUTABLE STRICT
+    RETURN CASE WHEN (state = ANY (ARRAY['spent'::public.spend_state, 'pool'::public.spend_state, 'ln-spent'::public.spend_state, 'round-forfeit'::public.spend_state, 'offboard-forfeit'::public.spend_state, 'offboard-connector'::public.spend_state])) THEN false WHEN (octet_length(policy) = 0) THEN true WHEN (get_byte(policy, 0) > 11) THEN true WHEN (state = ANY (ARRAY['spendable'::public.spend_state, 'unregistered'::public.spend_state, 'unclaimed'::public.spend_state, 'htlc-recv-unclaimed'::public.spend_state])) THEN (NOT ((policy = '\x07'::bytea) OR ((get_byte(policy, 0) = 4) AND (octet_length(policy) = 33)) OR ((state = 'unclaimed'::public.spend_state) AND (policy = '\x0002dfa52f6690299d2d6a08323083e290597b56fee125063e5f4e2957731639c42c'::bytea)))) ELSE true END;
 
 
 --
@@ -642,7 +685,11 @@ CREATE TABLE public.board_exit (
     funding_outpoint text NOT NULL,
     funding_spk bytea NOT NULL,
     exit_txid text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    owner_mailbox text,
+    user_pubkey text,
+    CONSTRAINT board_exit_owner_mailbox_check CHECK (((owner_mailbox IS NULL) OR (length(owner_mailbox) = 66))),
+    CONSTRAINT board_exit_user_pubkey_check CHECK (((user_pubkey IS NULL) OR (length(user_pubkey) = 66)))
 );
 
 
@@ -786,6 +833,105 @@ CREATE SEQUENCE public.ephemeral_tweak_id_seq
 --
 
 ALTER SEQUENCE public.ephemeral_tweak_id_seq OWNED BY public.ephemeral_tweak.id;
+
+
+--
+-- Name: expiry_cancelled_participation; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.expiry_cancelled_participation (
+    participation_id bigint NOT NULL,
+    unlock_hash text
+);
+
+
+--
+-- Name: expiry_payout; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.expiry_payout (
+    id bigint NOT NULL,
+    expiry_height integer NOT NULL,
+    broadcast_at timestamp with time zone,
+    CONSTRAINT expiry_payout_expiry_height_check CHECK ((expiry_height >= 0))
+);
+
+
+--
+-- Name: expiry_payout_attempt; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.expiry_payout_attempt (
+    expiry_payout_id bigint NOT NULL,
+    txid text NOT NULL,
+    signed_tx bytea NOT NULL,
+    fee_sat bigint NOT NULL,
+    CONSTRAINT expiry_payout_attempt_fee_sat_check CHECK ((fee_sat >= 0)),
+    CONSTRAINT expiry_payout_attempt_txid_check CHECK ((length(txid) = 64))
+);
+
+
+--
+-- Name: expiry_payout_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.expiry_payout_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: expiry_payout_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.expiry_payout_id_seq OWNED BY public.expiry_payout.id;
+
+
+--
+-- Name: expiry_payout_input; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.expiry_payout_input (
+    expiry_payout_id bigint NOT NULL,
+    vtxo_id text NOT NULL
+);
+
+
+--
+-- Name: expiry_payout_schema_history; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.expiry_payout_schema_history (
+    version integer NOT NULL,
+    name character varying(255),
+    applied_on character varying(255),
+    checksum character varying(255)
+);
+
+
+--
+-- Name: expiry_payout_vtxo; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.expiry_payout_vtxo (
+    expiry_payout_id bigint NOT NULL,
+    vtxo_id text NOT NULL,
+    owner_mailbox text,
+    disposition text NOT NULL,
+    gross_sat bigint NOT NULL,
+    fee_sat bigint NOT NULL,
+    payout_sat bigint NOT NULL,
+    replannable boolean NOT NULL,
+    CONSTRAINT expiry_payout_vtxo_check CHECK ((((disposition = 'owner'::text) AND (owner_mailbox IS NOT NULL) AND (gross_sat = (fee_sat + payout_sat))) OR ((disposition = 'operator'::text) AND (fee_sat = 0) AND (payout_sat = 0)))),
+    CONSTRAINT expiry_payout_vtxo_disposition_check CHECK ((disposition = ANY (ARRAY['owner'::text, 'operator'::text]))),
+    CONSTRAINT expiry_payout_vtxo_fee_sat_check CHECK ((fee_sat >= 0)),
+    CONSTRAINT expiry_payout_vtxo_gross_sat_check CHECK ((gross_sat > 0)),
+    CONSTRAINT expiry_payout_vtxo_owner_mailbox_check CHECK (((owner_mailbox IS NULL) OR (length(owner_mailbox) = 66))),
+    CONSTRAINT expiry_payout_vtxo_payout_sat_check CHECK ((payout_sat >= 0))
+);
 
 
 --
@@ -1048,7 +1194,8 @@ CREATE TABLE public.lightning_htlc_subscription (
     final_amount_msat bigint,
     receiver_mailbox_id text,
     user_agent text,
-    claim_pubkey text
+    claim_pubkey text,
+    arkoor_input_ids text[]
 );
 
 
@@ -1209,7 +1356,9 @@ CREATE TABLE public.lightning_payment_attempt (
     user_fee_sat bigint,
     user_agent text,
     retry_for_secs integer,
-    max_routing_fee_msat bigint
+    max_routing_fee_msat bigint,
+    intent_id text,
+    CONSTRAINT lightning_payment_attempt_intent_id_check CHECK (((intent_id IS NULL) OR (length(intent_id) = 64)))
 );
 
 
@@ -1457,6 +1606,17 @@ ALTER SEQUENCE public.round_participation_id_seq OWNED BY public.round_participa
 
 
 --
+-- Name: server_mode; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.server_mode (
+    id integer NOT NULL,
+    expiry_payouts boolean NOT NULL,
+    CONSTRAINT server_mode_id_check CHECK ((id = 1))
+);
+
+
+--
 -- Name: sweep; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1615,6 +1775,72 @@ CREATE VIEW public.v_conflicted_vtxos AS
    FROM (public.vtxo v
      JOIN public.v_conflicted_txids ct ON ((v.vtxo_txid = ct.txid)))
   WHERE ((v.onchain_spent_txid IS NULL) AND (v.spend_state <> 'offboard-connector'::public.spend_state));
+
+
+--
+-- Name: watchmand_block; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.watchmand_block (
+    height bigint NOT NULL,
+    hash text NOT NULL
+);
+
+
+--
+-- Name: v_expiry_payout_state; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_expiry_payout_state AS
+ WITH observed AS (
+         SELECT a_1.id,
+            ((count(i.vtxo_id) > 0) AND bool_and(((v.onchain_spent_txid IS NOT NULL) AND (b.height IS NOT NULL) AND (EXISTS ( SELECT 1
+                   FROM public.expiry_payout_attempt p
+                  WHERE ((p.expiry_payout_id = a_1.id) AND (p.txid = v.onchain_spent_txid)))))) AND (count(DISTINCT v.onchain_spent_txid) = 1)) AS confirmed,
+            (bool_or(((v.onchain_spent_txid IS NOT NULL) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.expiry_payout_attempt p
+                  WHERE ((p.expiry_payout_id = a_1.id) AND (p.txid = v.onchain_spent_txid))))))) OR (count(DISTINCT v.onchain_spent_txid) > 1)) AS conflicted,
+            min(v.onchain_spent_txid) AS confirmed_txid,
+            min(b.height) AS height
+           FROM (((public.expiry_payout a_1
+             LEFT JOIN public.expiry_payout_input i ON ((i.expiry_payout_id = a_1.id)))
+             LEFT JOIN public.vtxo v ON ((v.vtxo_id = i.vtxo_id)))
+             LEFT JOIN public.watchmand_block b ON ((b.height = v.onchain_spent_height)))
+          GROUP BY a_1.id
+        )
+ SELECT a.id,
+    a.expiry_height,
+        CASE
+            WHEN o.confirmed THEN o.confirmed_txid
+            ELSE latest.txid
+        END AS payout_txid,
+        CASE
+            WHEN o.confirmed THEN winner.signed_tx
+            ELSE latest.signed_tx
+        END AS payout_tx,
+    a.broadcast_at,
+        CASE
+            WHEN o.confirmed THEN 'confirmed'::text
+            WHEN (o.conflicted OR (EXISTS ( SELECT 1
+               FROM ((public.expiry_payout_vtxo c
+                 JOIN public.expiry_payout_vtxo paid ON ((paid.vtxo_id = c.vtxo_id)))
+                 JOIN observed prior ON ((prior.id = paid.expiry_payout_id)))
+              WHERE ((c.expiry_payout_id = a.id) AND prior.confirmed AND (prior.id <> a.id))))) THEN 'conflicted'::text
+            ELSE 'pending'::text
+        END AS status,
+        CASE
+            WHEN o.confirmed THEN o.height
+            ELSE NULL::bigint
+        END AS confirmed_height
+   FROM (((public.expiry_payout a
+     JOIN observed o ON ((o.id = a.id)))
+     LEFT JOIN public.expiry_payout_attempt winner ON (((winner.expiry_payout_id = a.id) AND (winner.txid = o.confirmed_txid))))
+     LEFT JOIN LATERAL ( SELECT p.txid,
+            p.signed_tx
+           FROM public.expiry_payout_attempt p
+          WHERE (p.expiry_payout_id = a.id)
+          ORDER BY p.fee_sat DESC
+         LIMIT 1) latest ON (true));
 
 
 --
@@ -2077,6 +2303,17 @@ ALTER SEQUENCE public.vtxo_mailbox_id_seq OWNED BY public.mailbox.id;
 
 
 --
+-- Name: vtxo_owner_mailbox; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vtxo_owner_mailbox (
+    vtxo_id text NOT NULL,
+    mailbox_pk text NOT NULL,
+    CONSTRAINT vtxo_owner_mailbox_mailbox_pk_check CHECK ((length(mailbox_pk) = 66))
+);
+
+
+--
 -- Name: vtxo_pool; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2142,16 +2379,6 @@ ALTER SEQUENCE public.wallet_changeset_id_seq OWNED BY public.wallet_changeset.i
 
 
 --
--- Name: watchmand_block; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.watchmand_block (
-    height bigint NOT NULL,
-    hash text NOT NULL
-);
-
-
---
 -- Name: arkoor_mailbox id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2177,6 +2404,13 @@ ALTER TABLE ONLY public.cln_xpay ALTER COLUMN id SET DEFAULT nextval('public.cln
 --
 
 ALTER TABLE ONLY public.ephemeral_tweak ALTER COLUMN id SET DEFAULT nextval('public.ephemeral_tweak_id_seq'::regclass);
+
+
+--
+-- Name: expiry_payout id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout ALTER COLUMN id SET DEFAULT nextval('public.expiry_payout_id_seq'::regclass);
 
 
 --
@@ -2363,6 +2597,70 @@ ALTER TABLE ONLY public.ephemeral_tweak
 
 
 --
+-- Name: expiry_cancelled_participation expiry_cancelled_participation_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_cancelled_participation
+    ADD CONSTRAINT expiry_cancelled_participation_pkey PRIMARY KEY (participation_id);
+
+
+--
+-- Name: expiry_cancelled_participation expiry_cancelled_participation_unlock_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_cancelled_participation
+    ADD CONSTRAINT expiry_cancelled_participation_unlock_hash_key UNIQUE (unlock_hash);
+
+
+--
+-- Name: expiry_payout_attempt expiry_payout_attempt_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout_attempt
+    ADD CONSTRAINT expiry_payout_attempt_pkey PRIMARY KEY (expiry_payout_id, txid);
+
+
+--
+-- Name: expiry_payout_attempt expiry_payout_attempt_txid_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout_attempt
+    ADD CONSTRAINT expiry_payout_attempt_txid_key UNIQUE (txid);
+
+
+--
+-- Name: expiry_payout_input expiry_payout_input_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout_input
+    ADD CONSTRAINT expiry_payout_input_pkey PRIMARY KEY (expiry_payout_id, vtxo_id);
+
+
+--
+-- Name: expiry_payout expiry_payout_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout
+    ADD CONSTRAINT expiry_payout_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: expiry_payout_schema_history expiry_payout_schema_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout_schema_history
+    ADD CONSTRAINT expiry_payout_schema_history_pkey PRIMARY KEY (version);
+
+
+--
+-- Name: expiry_payout_vtxo expiry_payout_vtxo_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout_vtxo
+    ADD CONSTRAINT expiry_payout_vtxo_pkey PRIMARY KEY (expiry_payout_id, vtxo_id);
+
+
+--
 -- Name: htlc_settlement htlc_settlement_payment_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2459,6 +2757,14 @@ ALTER TABLE ONLY public.lightning_payment_attempt_htlc_vtxo
 
 
 --
+-- Name: lightning_payment_attempt lightning_payment_attempt_intent_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.lightning_payment_attempt
+    ADD CONSTRAINT lightning_payment_attempt_intent_id_key UNIQUE (intent_id);
+
+
+--
 -- Name: lightning_payment_attempt lightning_payment_attempt_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2515,6 +2821,14 @@ ALTER TABLE ONLY public.round
 
 
 --
+-- Name: server_mode server_mode_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.server_mode
+    ADD CONSTRAINT server_mode_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: sweep sweep_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2536,6 +2850,14 @@ ALTER TABLE ONLY public.virtual_transaction
 
 ALTER TABLE ONLY public.mailbox
     ADD CONSTRAINT vtxo_mailbox_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: vtxo_owner_mailbox vtxo_owner_mailbox_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vtxo_owner_mailbox
+    ADD CONSTRAINT vtxo_owner_mailbox_pkey PRIMARY KEY (vtxo_id);
 
 
 --
@@ -2593,6 +2915,13 @@ CREATE UNIQUE INDEX arkoor_mailbox_vtxo_id_uix ON public.arkoor_mailbox USING bt
 
 
 --
+-- Name: board_exit_exit_txid_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX board_exit_exit_txid_idx ON public.board_exit USING btree (exit_txid);
+
+
+--
 -- Name: cln_hold_open_ix; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2632,6 +2961,13 @@ CREATE UNIQUE INDEX cln_xpay_pending_hash_ux ON public.cln_xpay USING btree (pay
 --
 
 CREATE INDEX cln_xpay_pending_ix ON public.cln_xpay USING btree (lightning_node_id, id) WHERE (status = 'pending'::public.cln_xpay_status);
+
+
+--
+-- Name: expiry_payout_vtxo_vtxo_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX expiry_payout_vtxo_vtxo_id_idx ON public.expiry_payout_vtxo USING btree (vtxo_id);
 
 
 --
@@ -3020,6 +3356,27 @@ CREATE TRIGGER virtual_transaction_history_update BEFORE UPDATE ON public.virtua
 
 
 --
+-- Name: vtxo_owner_mailbox vtxo_owner_mailbox_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER vtxo_owner_mailbox_immutable BEFORE DELETE OR UPDATE ON public.vtxo_owner_mailbox FOR EACH ROW EXECUTE FUNCTION public.preserve_vtxo_owner_mailbox();
+
+
+--
+-- Name: vtxo_owner_mailbox vtxo_owner_mailbox_no_truncate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER vtxo_owner_mailbox_no_truncate BEFORE TRUNCATE ON public.vtxo_owner_mailbox FOR EACH STATEMENT EXECUTE FUNCTION public.preserve_vtxo_owner_mailbox();
+
+
+--
+-- Name: vtxo vtxo_require_owner_mailbox; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER vtxo_require_owner_mailbox AFTER INSERT OR UPDATE OF vtxo_id, spend_state, policy ON public.vtxo DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (public.vtxo_requires_owner_mailbox(new.spend_state, new.policy)) EXECUTE FUNCTION public.require_vtxo_owner_mailbox();
+
+
+--
 -- Name: vtxo vtxo_update; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -3048,6 +3405,46 @@ ALTER TABLE ONLY public.cln_hold
 
 ALTER TABLE ONLY public.cln_xpay
     ADD CONSTRAINT cln_xpay_lightning_node_id_fkey FOREIGN KEY (lightning_node_id) REFERENCES public.lightning_node(id);
+
+
+--
+-- Name: expiry_payout_attempt expiry_payout_attempt_expiry_payout_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout_attempt
+    ADD CONSTRAINT expiry_payout_attempt_expiry_payout_id_fkey FOREIGN KEY (expiry_payout_id) REFERENCES public.expiry_payout(id);
+
+
+--
+-- Name: expiry_payout_input expiry_payout_input_expiry_payout_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout_input
+    ADD CONSTRAINT expiry_payout_input_expiry_payout_id_fkey FOREIGN KEY (expiry_payout_id) REFERENCES public.expiry_payout(id);
+
+
+--
+-- Name: expiry_payout_input expiry_payout_input_vtxo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout_input
+    ADD CONSTRAINT expiry_payout_input_vtxo_id_fkey FOREIGN KEY (vtxo_id) REFERENCES public.vtxo(vtxo_id);
+
+
+--
+-- Name: expiry_payout_vtxo expiry_payout_vtxo_expiry_payout_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout_vtxo
+    ADD CONSTRAINT expiry_payout_vtxo_expiry_payout_id_fkey FOREIGN KEY (expiry_payout_id) REFERENCES public.expiry_payout(id);
+
+
+--
+-- Name: expiry_payout_vtxo expiry_payout_vtxo_vtxo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.expiry_payout_vtxo
+    ADD CONSTRAINT expiry_payout_vtxo_vtxo_id_fkey FOREIGN KEY (vtxo_id) REFERENCES public.vtxo(vtxo_id);
 
 
 --
@@ -3224,6 +3621,14 @@ ALTER TABLE ONLY public.vtxo
 
 ALTER TABLE ONLY public.mailbox
     ADD CONSTRAINT vtxo_mailbox_vtxo_id_fkey FOREIGN KEY (vtxo_id) REFERENCES public.vtxo(vtxo_id);
+
+
+--
+-- Name: vtxo_owner_mailbox vtxo_owner_mailbox_vtxo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vtxo_owner_mailbox
+    ADD CONSTRAINT vtxo_owner_mailbox_vtxo_id_fkey FOREIGN KEY (vtxo_id) REFERENCES public.vtxo(vtxo_id);
 
 
 --

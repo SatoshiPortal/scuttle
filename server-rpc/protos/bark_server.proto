@@ -60,6 +60,7 @@ service ArkService {
 	rpc PrepareLightningReceiveClaim(PrepareLightningReceiveClaimRequest) returns (PrepareLightningReceiveClaimResponse) {}
 	rpc ClaimLightningReceive(ClaimLightningReceiveRequest) returns (ArkoorPackageCosignResponse) {}
 	rpc CancelLightningReceive(CancelLightningReceiveRequest) returns (core.Empty) {}
+	rpc RequestLightningReceiveArkoorCosign(LightningReceiveArkoorCosignRequest) returns (ArkoorPackageCosignResponse) {}
 
 	// * OFFBOARDS
 
@@ -232,6 +233,33 @@ message GetVtxoStatusRequest {
 
 message GetVtxoStatusResponse {
 	VtxoSpendState spend_state = 1;
+	// Expiry payout mode only: the owner mailbox key of the VTXO.
+	bytes owner_mailbox = 1000;
+	// Expiry payout mode only: set when the server decided to pay out the
+	// VTXO. The spend state of the VTXO is then SPENT.
+	optional ExpiryPayout expiry_payout = 1001;
+}
+
+enum ExpiryPayoutState {
+	EXPIRY_PAYOUT_STATE_UNSPECIFIED = 0;
+	// The payout transaction is less than six blocks deep.
+	EXPIRY_PAYOUT_STATE_PENDING = 1;
+	// The payout transaction is at least six blocks deep.
+	EXPIRY_PAYOUT_STATE_PAID = 2;
+	// The payout fee is not less than the VTXO amount, so the server pays
+	// nothing.
+	EXPIRY_PAYOUT_STATE_FORFEITED = 3;
+}
+
+// The payout of an expired VTXO to `tr(owner_mailbox)`.
+message ExpiryPayout {
+	ExpiryPayoutState state = 1;
+	// The amount of the VTXO.
+	uint64 gross_sat = 2;
+	// The payout fee.
+	uint64 fee_sat = 3;
+	// The amount paid on-chain, zero for a forfeited VTXO.
+	uint64 payout_sat = 4;
 }
 
 message VtxoStatusQuery {
@@ -248,6 +276,9 @@ message GetVtxosStatusByIdsRequest {
 message VtxoStatus {
 	bytes vtxo_id = 1;
 	VtxoSpendState spend_state = 2;
+	// Expiry payout mode only, see GetVtxoStatusResponse.
+	bytes owner_mailbox = 1000;
+	optional ExpiryPayout expiry_payout = 1001;
 }
 
 message GetVtxosStatusByIdsResponse {
@@ -281,6 +312,8 @@ message RecoveredVtxo {
 	// xpub/derivation_index.
 	uint32 derivation_index = 2;
 	VtxoSpendState spend_state = 3;
+	// Expiry payout mode only: the owner mailbox key of the VTXO.
+	bytes owner_mailbox = 1000;
 }
 
 message RecoverVtxosByXpubResponse {
@@ -307,6 +340,8 @@ message BoardCosignRequest {
 	bytes user_pubkey = 4;
 	bytes pub_nonce = 5;
 	bytes funding_tx = 6;
+	// Expiry payout mode only: the owner mailbox key of the board VTXO.
+	optional bytes owner_mailbox = 1000;
 }
 
 message BoardCosignResponse {
@@ -334,6 +369,9 @@ message VtxoRequest {
 message ArkoorDestination {
 	uint64 total_amount = 1;
 	bytes policy = 2;
+	// Expiry payout mode only: the blinded owner mailbox of the output. The
+	// server unblinds it with the user public key of the policy.
+	bytes blinded_mailbox_id = 1000;
 }
 
 message ArkoorCosignRequest {
@@ -377,11 +415,18 @@ message InitiateLightningPaymentRequest {
 	// single attempt. Values above the server's maximum are capped to it.
 	// The server picks its default when unset.
 	optional uint32 retry_for_secs = 5;
+	// Expiry payout mode only: a nonce that makes the request unique, and
+	// the signature of the request by the key of the HTLC VTXOs. A retry
+	// must send the same request.
+	optional bytes intent_nonce = 1000;
+	bytes source_owner_signature = 1001;
 }
 
 message CheckLightningPaymentRequest {
 	bytes hash = 1;
 	bool wait = 2;
+	// Expiry payout mode only: all HTLC VTXOs of the payment.
+	repeated bytes htlc_vtxo_ids = 1000;
 }
 
 message PaymentSuccessStatus {
@@ -419,6 +464,10 @@ message StartLightningReceiveRequest {
 	// The key the HTLC-recv VTXOs will be locked to. When set, the claim can
 	// only be prepared with this key and a claim_attestation signed by it.
 	optional bytes claim_pubkey = 7;
+	// Put the Ark address of claim_pubkey and mailbox_id in the invoice as
+	// route hints, so a user of this server can pay it with an arkoor
+	// instead. A server that does not allow it ignores this field.
+	bool ark_address_hint = 1000;
 }
 
 message StartLightningReceiveResponse {
@@ -457,6 +506,13 @@ message ClaimLightningReceiveRequest {
 
 message CancelLightningReceiveRequest {
 	bytes payment_hash = 1;
+}
+
+// An arkoor that pays the invoice of a Lightning receive on the Ark address
+// in its route hints. The server settles the receive when it co-signs.
+message LightningReceiveArkoorCosignRequest {
+	bytes payment_hash = 1;
+	ArkoorPackageCosignRequest cosign_request = 2;
 }
 
 enum LightningReceiveStatus {

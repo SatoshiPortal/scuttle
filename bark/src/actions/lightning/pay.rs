@@ -92,6 +92,10 @@ pub struct LightningSend {
 	/// leaves it to the server, and for checkpoints predating this field.
 	#[serde(default)]
 	pub retry_for: Option<Duration>,
+	/// The nonce of the payment request that a server in expiry payout mode
+	/// requires to be signed. A retry sends the same signed request.
+	#[serde(default)]
+	pub intent_nonce: Option<[u8; 32]>,
 
 	// Mutable state:
 	pub progress: Progress,
@@ -178,7 +182,7 @@ impl WalletAction for LightningSend {
 				Progress::PaymentInitiated(htlcs.clone())
 			},
 			Progress::PaymentInitiated(htlcs) => {
-				match check_lightning_send_payment_status(wallet, &self).await.retry()? {
+				match check_lightning_send_payment_status(wallet, &self, htlcs).await.retry()? {
 					PaymentStatus::Success(preimage) => {
 						settle_lightning_send_payment(wallet, &self, htlcs, preimage).await?;
 						return Ok(Advance::Done);
@@ -205,6 +209,9 @@ impl WalletAction for LightningSend {
 			},
 			Progress::RevocableHtlcs { htlcs, revocation } |
 			Progress::RevocationStuck { htlcs, revocation } => {
+				if wallet.finish_paid_out_lightning_send(htlcs).await.retry()? {
+					return Ok(Advance::Done);
+				}
 				revoke_lightning_send_htlcs(wallet, &self, htlcs, revocation).await?;
 				return Ok(Advance::Done);
 			},
@@ -427,6 +434,7 @@ pub(crate) async fn start_lightning_send(
 		movement_id: None,
 		revocation_key: revocation_keypair.public_key(),
 		retry_for,
+		intent_nonce: wallet.expiry_payouts().await.then(rand::random),
 		allow_exit_of_htlcs: false,
 		progress: Progress::Start,
 	})
@@ -511,9 +519,17 @@ async fn request_lightning_send_htlcs(
 		.context("failed to hydrate lightning-send input vtxos").retry()?;
 
 	// Ensure inputs are fully registered server-side before the cosign.
-	wallet.register_vtxo_transactions_with_server(&full_inputs).await
-		.context("failed to register lightning-send input vtxo transactions with server")
-		.retry()?;
+	if let Err(e) = wallet.register_vtxo_transactions_with_server(&full_inputs).await {
+		if !is_decided_for_payout(&e) {
+			return Err(AdvanceError::Retry(e.context(
+				"failed to register lightning-send input vtxo transactions with server",
+			)));
+		}
+		// A previous co-sign may have committed while its reply was lost.
+		// Let the idempotent co-sign distinguish that replay from a new spend
+		// of an input already decided for payout.
+		info!("Lightning-send input registration was refused by a payout decision; reconciling co-sign");
+	}
 
 	let mut input_keypairs = Vec::with_capacity(full_inputs.len());
 	for input in full_inputs.iter() {
@@ -544,9 +560,10 @@ async fn request_lightning_send_htlcs(
 		.generate_user_nonces(&input_keypairs)
 		.context("invalid nb of keypairs").abort()?;
 
-	let cosign_request = protos::LightningPayHtlcCosignRequest {
+	let mut cosign_request = protos::LightningPayHtlcCosignRequest {
 		parts: protos::ArkoorPackageCosignRequest::from(builder.cosign_request()).parts,
 	};
+	wallet.bind_output_mailboxes(&mut cosign_request.parts, None).await.abort()?;
 	let response = srv.client.request_lightning_pay_htlc_cosign(cosign_request).await
 		.retry_unless_rejected()?.into_inner();
 
@@ -612,6 +629,14 @@ async fn request_lightning_send_htlcs(
 	})
 }
 
+fn is_decided_for_payout(error: &anyhow::Error) -> bool {
+	error.chain().filter_map(|cause| cause.downcast_ref::<tonic::Status>()).any(|status| {
+		status.code() == tonic::Code::InvalidArgument
+			&& status.metadata().get("expiry-payout-reason")
+				.and_then(|value| value.to_str().ok()) == Some("decided_for_payout")
+	})
+}
+
 /// HtlcReceived -> PaymentInitiated. Tells the server to actually pay
 /// the invoice. Server-side `initiate_lightning_payment` is idempotent
 /// on payment_hash.
@@ -622,14 +647,18 @@ async fn initiate_lightning_send_payment(
 ) -> Result<(), AdvanceError> {
 	let (mut srv, _) = wallet.require_server().await.retry()?;
 
-	let req = protos::InitiateLightningPaymentRequest {
+	let mut req = protos::InitiateLightningPaymentRequest {
 		invoice: send.invoice.to_string(),
 		htlc_vtxo_ids: htlcs.vtxo_ids.iter().map(|v| v.to_bytes().to_vec()).collect(),
 		payment_amount_sat: send.payment_amount.to_sat(),
 		mailbox_id: Some(htlcs.mailbox_id.serialize()),
 		// The server caps it to its own maximum.
 		retry_for_secs: send.retry_for.map(|d| d.as_secs().try_into().unwrap_or(u32::MAX)),
+		..Default::default()
 	};
+	if srv.expiry_payouts().await {
+		wallet.sign_lightning_payment(send, htlcs, &mut req).await.retry()?;
+	}
 	// A rejection aborts: `abort` then revokes the HTLCs.
 	srv.client.initiate_lightning_payment(req).await.retry_unless_rejected()?;
 
@@ -642,6 +671,7 @@ async fn initiate_lightning_send_payment(
 async fn check_lightning_send_payment_status(
 	wallet: &Wallet,
 	send: &LightningSend,
+	htlcs: &Htlcs,
 ) -> anyhow::Result<PaymentStatus> {
 	let (mut srv, _) = wallet.require_server().await?;
 	let payment_hash = send.invoice.payment_hash();
@@ -650,10 +680,14 @@ async fn check_lightning_send_payment_status(
 	let expired = tip > send.htlc_expiry;
 	let pending_status = if expired { PaymentStatus::Failed } else { PaymentStatus::Pending };
 
-	let req = protos::CheckLightningPaymentRequest {
+	let mut req = protos::CheckLightningPaymentRequest {
 		hash: payment_hash.to_vec(),
 		wait: false,
+		..Default::default()
 	};
+	if srv.expiry_payouts().await {
+		req.htlc_vtxo_ids = htlcs.vtxo_ids.iter().map(|id| id.to_bytes().to_vec()).collect();
+	}
 	// NB: don't early-return on transport errors; collapse to
 	// expired-or-pending so the executor can revoke when appropriate.
 	let response = srv.client.check_lightning_payment(req).await
@@ -755,7 +789,8 @@ async fn revoke_lightning_send_htlcs(
 		.generate_user_nonces(&htlc_keypairs)
 		.context("failed to generate user nonces").abort()?;
 
-	let cosign_request = protos::ArkoorPackageCosignRequest::from(builder.cosign_request());
+	let mut cosign_request = protos::ArkoorPackageCosignRequest::from(builder.cosign_request());
+	wallet.bind_output_mailboxes(&mut cosign_request.parts, None).await.abort()?;
 	let response = srv.client
 		.request_lightning_pay_htlc_revocation(cosign_request).await
 		.retry_unless_rejected()?.into_inner();
@@ -909,6 +944,7 @@ mod test {
 			movement_id: None,
 			revocation_key: key,
 			retry_for: None,
+			intent_nonce: None,
 			progress: Progress::Start,
 			allow_exit_of_htlcs: false,
 		};

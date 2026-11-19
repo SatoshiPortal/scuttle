@@ -1,5 +1,6 @@
 
 mod model;
+mod receive_arkoor;
 pub use model::*;
 
 
@@ -213,6 +214,25 @@ impl<'t> Tx<'t> {
 		}
 	}
 
+	/// Get the payment attempt initiated against the given htlc
+	/// subscription that is open or succeeded.
+	///
+	/// The expiry payout cancellation guard must also find succeeded attempts.
+	pub async fn get_lightning_payment_attempt_by_subscription_id(
+		&self,
+		lightning_htlc_subscription_id: i64,
+	) -> anyhow::Result<Option<LightningPaymentAttempt>> {
+		let stmt = self.prepare(&format!("
+			SELECT {LIGHTNING_PAYMENT_ATTEMPT_COLUMNS}
+			FROM lightning_payment_attempt lpa
+			WHERE lpa.lightning_htlc_subscription_id = $1 AND lpa.status != $2
+			ORDER BY lpa.created_at DESC
+			LIMIT 1;
+		")).await?;
+		let row = self.query_opt(&stmt, &[&lightning_htlc_subscription_id, &LightningPaymentStatus::Failed]).await?;
+		row.map(TryInto::try_into).transpose()
+	}
+
 	/// Stores data after lightning payment start.
 	///
 	/// Creates a new payment attempt for the given invoice and links the
@@ -243,6 +263,8 @@ impl<'t> Tx<'t> {
 		retry_for: Duration,
 		// `None` for intra-Ark self-payments, which never reach CLN.
 		max_routing_fee: Option<Amount>,
+		// The id of the signed send intent, in payout mode.
+		intent_id: Option<&str>,
 	) -> anyhow::Result<i64> {
 		let payment_hash = invoice.payment_hash();
 
@@ -275,11 +297,12 @@ impl<'t> Tx<'t> {
 				user_fee_sat,
 				user_agent,
 				retry_for_secs,
+				intent_id,
 				max_routing_fee_msat,
 				created_at,
 				updated_at,
 				lightning_htlc_subscription_id
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), $11)
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW(), $12)
 			RETURNING id, updated_at;
 		").await?;
 
@@ -297,7 +320,7 @@ impl<'t> Tx<'t> {
 				&node_id, &payment_hash.to_string(), &(amount.to_msat() as i64),
 				&mailbox_str, &requested_status,
 				&block_height_i32, &user_fee_sat_i64, &user_agent, &retry_for_secs_i32,
-				&max_routing_fee_msat_i64,
+				&intent_id, &max_routing_fee_msat_i64,
 				&lightning_htlc_subscription_id,
 			],
 		).await?;

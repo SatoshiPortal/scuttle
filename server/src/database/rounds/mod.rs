@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 use anyhow::Context;
 use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Transaction, Txid};
 use bitcoin::consensus::serialize;
 use tokio_postgres::types::Type;
@@ -24,7 +25,7 @@ use crate::round::InteractiveParticipation;
 
 
 impl<'t> Tx<'t> {
-	#[tracing::instrument(skip(self, unsigned_funding_tx, input_vtxos, signed_tree, interactive_participations))]
+	#[tracing::instrument(skip(self, unsigned_funding_tx, input_vtxos, signed_tree, interactive_participations, owner_bindings))]
 	pub async fn finish_round(
 		&self,
 		round_seq: RoundSeq,
@@ -32,7 +33,10 @@ impl<'t> Tx<'t> {
 		input_vtxos: impl IntoIterator<Item = VtxoId>,
 		signed_tree: &CachedSignedVtxoTree,
 		interactive_participations: &HashMap<UnlockHash, InteractiveParticipation>,
+		owner_bindings: &[(VtxoId, PublicKey)],
 	) -> anyhow::Result<()> {
+		let input_vtxos = input_vtxos.into_iter().collect::<Vec<_>>();
+		self.guard_round_finish(&input_vtxos, signed_tree).await?;
 		let funding_txid = unsigned_funding_tx.compute_txid();
 		info!("Storing finished round with funding txid {}", funding_txid);
 
@@ -113,7 +117,8 @@ impl<'t> Tx<'t> {
 			.upsert_unsigned_tx(signed_tree.unsigned_leaf_txs().iter().map(Transaction::compute_txid))
 			.insert_oor_spent_vtxos(signed_tree.internal_vtxos())
 			.insert_unclaimed_vtxos(signed_tree.output_vtxos().map(ServerVtxo::from))
-			.mark_vtxos_round_spent(input_vtxos.into_iter().map(|id| (id, round_id)));
+			.mark_vtxos_round_spent(input_vtxos.into_iter().map(|id| (id, round_id)))
+			.bind_owner_mailboxes(owner_bindings.iter().copied())?;
 		tree::execute_vtxo_tree_update(&self, update).await?;
 
 		// register the funding output vtxos directly into the frontier
@@ -273,6 +278,8 @@ impl<'t> Tx<'t> {
 			unlock_hash, inputs,
 		);
 
+		self.guard_spend_changes(inputs).await?;
+
 		// check that all inputs are free
 		for vtxo in query::get_vtxos_by_id(&self, inputs).await? {
 			vtxo.check_spendable(chain_tip)?;
@@ -308,6 +315,8 @@ impl<'t> Tx<'t> {
 		if vtxo_ids.is_empty() {
 			return Ok(());
 		}
+
+		self.guard_forfeit_commit(vtxo_ids, unlock_hash).await?;
 
 		let vtxo_id_strs = vtxo_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
 		let serialized = forfeits.iter().map(|ff| serialize(ff)).collect::<Vec<_>>();

@@ -9,6 +9,7 @@
 //! lifecycle data, Lightning receives, exit tracking, and sync metadata.
 
 mod convert;
+mod expiry_payout;
 mod migrations;
 mod query;
 
@@ -35,7 +36,7 @@ use crate::movement::update::MovementUpdate;
 use crate::persist::{BarkPersister, RoundStateId, StoredRoundState, Unlocked};
 use crate::persist::models::{PaidInvoice, SettledLightningReceive, StoredExit};
 use crate::round::RoundState;
-use crate::vtxo::{VtxoLockHolder, VtxoState, VtxoStateKind, WalletVtxo};
+use crate::vtxo::{ExpiryPayoutState, VtxoLockHolder, VtxoState, VtxoStateKind, WalletVtxo};
 
 
 /// The default sqlite db file for when no file path was provided
@@ -102,6 +103,11 @@ impl BarkPersister for SqliteClient {
 	async fn read_properties(&self) -> anyhow::Result<Option<WalletProperties>> {
 		let conn = self.connect()?;
 		Ok(query::fetch_properties(&conn)?)
+	}
+
+	async fn set_mailbox_key(&self, mailbox_pubkey: PublicKey) -> anyhow::Result<()> {
+		let conn = self.connect()?;
+		expiry_payout::store_mailbox_pubkey(&conn, &mailbox_pubkey)
 	}
 
 	async fn set_server_pubkey(&self, server_pubkey: PublicKey) -> anyhow::Result<()> {
@@ -290,6 +296,18 @@ impl BarkPersister for SqliteClient {
 		let tx = conn.transaction().context("Failed to start transaction")?;
 		query::store_vtxo_keys(&tx, keys)?;
 		tx.commit().context("Failed to commit transaction")
+	}
+
+	async fn set_vtxo_expiry_payout_state(
+		&self,
+		vtxo_id: VtxoId,
+		payout_state: ExpiryPayoutState,
+	) -> anyhow::Result<WalletVtxo> {
+		let mut conn = self.connect()?;
+		let tx = conn.transaction()?;
+		let vtxo = expiry_payout::set_vtxo_expiry_payout_state(&tx, vtxo_id, payout_state)?;
+		tx.commit()?;
+		Ok(vtxo)
 	}
 
 	async fn get_last_vtxo_key_index(&self) -> anyhow::Result<Option<u32>> {

@@ -32,7 +32,7 @@ use crate::persist::models::{SerdeRoundState, StoredExit, StoredRoundState, Unlo
 use crate::lock_manager::LockManager;
 use crate::lock_manager::memory::MemoryLockManager;
 use crate::round::{RoundFlowState, RoundParticipation, RoundState};
-use crate::vtxo::{VtxoState, VtxoStateKind, WalletVtxo};
+use crate::vtxo::{ExpiryPayoutState, VtxoState, VtxoStateKind, WalletVtxo};
 use crate::WalletProperties;
 
 // ---------------------------------------------------------------------------
@@ -61,6 +61,7 @@ macro_rules! bark_persister_tests {
 			test_init_and_read_properties,
 			test_set_server_pubkey,
 			test_set_server_mailbox_pubkey,
+			test_set_mailbox_key,
 
 			test_mailbox_checkpoint_empty_db,
 			test_mailbox_checkpoint_roundtrip,
@@ -78,6 +79,7 @@ macro_rules! bark_persister_tests {
 			test_remove_vtxo,
 			test_has_spent_vtxo,
 			test_store_vtxos_idempotent,
+			test_vtxo_expiry_payout_state,
 			test_steal_lock_to_spent,
 			test_steal_lock,
 
@@ -124,6 +126,7 @@ fn test_properties() -> WalletProperties {
 		fingerprint: Fingerprint::default(),
 		server_pubkey: None,
 		server_mailbox_pubkey: None,
+		mailbox_pubkey: None,
 	}
 }
 
@@ -207,6 +210,7 @@ fn send_at_start() -> LightningSend {
 		movement_id: None,
 		revocation_key: test_pubkey(),
 		retry_for: None,
+		intent_nonce: None,
 		progress: Progress::Start,
 		allow_exit_of_htlcs: false,
 	}
@@ -313,6 +317,16 @@ pub async fn test_set_server_mailbox_pubkey(db: &impl BarkPersister) {
 
 	let read = db.read_properties().await.expect("read_properties").expect("properties present");
 	assert_eq!(read, WalletProperties { server_mailbox_pubkey: Some(pk), ..test_properties() });
+}
+
+pub async fn test_set_mailbox_key(db: &impl BarkPersister) {
+	db.init_wallet(&test_properties()).await.expect("init_wallet");
+	let pk = test_pubkey();
+
+	db.set_mailbox_key(pk).await.expect("set_mailbox_key");
+
+	let read = db.read_properties().await.expect("read_properties").expect("properties present");
+	assert_eq!(read, WalletProperties { mailbox_pubkey: Some(pk), ..test_properties() });
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +559,26 @@ pub async fn test_store_vtxos_idempotent(db: &impl BarkPersister) {
 	assert_eq!(stored.state, VtxoState::Spendable, "the state survives a repeated store");
 	assert_eq!(db.get_all_vtxos().await.expect("get_all_vtxos").len(), 1,
 		"a repeated store must not insert a second row");
+}
+
+/// The expiry payout state of a VTXO marks it spent, and goes away with the VTXO.
+pub async fn test_vtxo_expiry_payout_state(db: &impl BarkPersister) {
+	let vtxo = &VTXO_VECTORS.board_vtxo;
+	db.store_vtxos(&[(vtxo, &VtxoState::Spendable)]).await.unwrap();
+	assert_eq!(db.get_wallet_vtxo(vtxo.id()).await.unwrap().unwrap().expiry_payout_state, None);
+
+	let pending = db.set_vtxo_expiry_payout_state(vtxo.id(), ExpiryPayoutState::Pending).await.unwrap();
+	assert_eq!(pending.state, VtxoState::Spent);
+	assert_eq!(pending.expiry_payout_state, Some(ExpiryPayoutState::Pending));
+
+	db.set_vtxo_expiry_payout_state(vtxo.id(), ExpiryPayoutState::Paid).await.unwrap();
+	let all = db.get_all_vtxos().await.unwrap();
+	assert_eq!(all.len(), 1);
+	assert_eq!(all[0].expiry_payout_state, Some(ExpiryPayoutState::Paid));
+
+	db.remove_vtxo(vtxo.id()).await.unwrap();
+	db.store_vtxos(&[(vtxo, &VtxoState::Spendable)]).await.unwrap();
+	assert_eq!(db.get_wallet_vtxo(vtxo.id()).await.unwrap().unwrap().expiry_payout_state, None);
 }
 
 pub async fn test_steal_lock_to_spent(db: &impl BarkPersister) {

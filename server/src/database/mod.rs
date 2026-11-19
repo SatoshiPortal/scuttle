@@ -6,11 +6,15 @@ mod embedded {
 	pub mod migrations {
 		include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
 	}
+	pub mod expiry_payout_migrations {
+		include!(concat!(env!("OUT_DIR"), "/expiry_payout_migrations.rs"));
+	}
 }
 
 mod ban;
 pub mod block;
 pub mod data_migrations;
+pub mod expiry_payout;
 pub mod hold;
 pub mod htlc_vtxo;
 pub mod watchman;
@@ -28,6 +32,7 @@ mod query;
 pub use self::block::BlockTable;
 pub use self::model::*;
 
+use self::expiry_payout::ownership::OwnerBindingMismatch;
 
 use std::borrow::Borrow;
 use std::str::FromStr;
@@ -147,13 +152,18 @@ pub enum MailboxPayload {
 
 #[derive(Clone)]
 pub struct Db {
-	pool: Pool<ConnectionManager>
+	pool: Pool<ConnectionManager>,
+	expiry_payouts: bool,
 }
 
 impl Db {
 	async fn run_migrations(&self) -> anyhow::Result<()> {
 		let mut conn = self.get_conn().await?;
 		embedded::migrations::runner().run_async::<Client>(&mut conn).await?;
+		// The expiry payout schema has its own history, so its numbers
+		// never collide with those of the main migrations.
+		embedded::expiry_payout_migrations::runner().set_migration_table_name("expiry_payout_schema_history")
+			.run_async::<Client>(&mut conn).await?;
 		info!("All migrations got successfully run");
 		Ok(())
 	}
@@ -226,8 +236,9 @@ impl Db {
 	pub async fn connect(config: &PostgresConfig) -> anyhow::Result<Self> {
 		let pool = Self::pool_connect(&config.name, config).await?;
 
-		let db = Db { pool };
+		let mut db = Db { pool, expiry_payouts: false };
 		db.run_migrations().await?;
+		db.load_expiry_payouts().await?;
 
 		Ok(db)
 	}
@@ -315,7 +326,7 @@ impl Db {
 			.read_only(read_only)
 			.start().await
 			.context("unable to start db tx")?;
-		let tx = Tx { inner: &pgtx };
+		let tx = Tx { inner: &pgtx, expiry_payouts: self.expiry_payouts };
 		let ret = f(&tx).await;
 		if read_only {
 			// We want to commit read queries regardless of error because it's the
@@ -323,7 +334,11 @@ impl Db {
 			pgtx.commit().await.context("db tx commit error")?;
 		} else {
 			if ret.is_ok() {
-				pgtx.commit().await.context("db tx commit error")?;
+				pgtx.commit().await.map_err(|error| {
+					let missing_owner = OwnerBindingMismatch::is_constraint_violation(&error);
+					let error = anyhow::Error::new(error).context("db tx commit error");
+					if missing_owner { error.context(OwnerBindingMismatch) } else { error }
+				})?;
 			} else {
 				pgtx.rollback().await.context("db tx rollback error")?;
 			}
@@ -351,6 +366,7 @@ impl Db {
 /// A managed postgres DB transaction
 pub struct Tx<'t> {
 	inner: &'t tokio_postgres::Transaction<'t>,
+	expiry_payouts: bool,
 }
 
 impl<'t> std::ops::Deref for Tx<'t> {
@@ -488,6 +504,8 @@ impl<'t> Tx<'t> {
 		if vtxos.is_empty() {
 			return Ok(None);
 		}
+
+		self.check_owner_mailbox(mailbox_id, &vtxos.iter().map(|vtxo| vtxo.id()).collect::<Vec<_>>()).await?;
 
 		// Acquire advisory lock to serialize all mailbox writes.
 		// This prevents race conditions where checkpoints could be committed out of order.

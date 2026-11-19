@@ -77,7 +77,7 @@ async fn assert_vtxopool_consistency(srv: &Captaind) {
 }
 
 /// The HTLC-send vtxos `client` holds for `payment_hash`.
-async fn htlc_send_vtxo_ids(
+pub(crate) async fn htlc_send_vtxo_ids(
 	client: &Wallet,
 	payment_hash: ark::lightning::PaymentHash,
 ) -> Vec<ark::VtxoId> {
@@ -563,6 +563,7 @@ async fn intra_ark_granted_receive_canceled_after_htlc_recv_expiry() {
 	let status = srv.get_public_rpc().await.check_lightning_payment(protos::CheckLightningPaymentRequest {
 		hash: payment_hash.to_vec(),
 		wait: true,
+		htlc_vtxo_ids: Vec::new(),
 	}).wait_millis(30_000).await.expect("check_lightning_payment failed").into_inner();
 	assert!(
 		matches!(status.payment_status, Some(protos::lightning_payment_status::PaymentStatus::Failed(_))),
@@ -804,6 +805,8 @@ impl RawHtlcSend {
 	async fn initiate(&self, srv: &Captaind, invoice: &str, amount: Amount) -> Result<(), tonic::Status> {
 		let mut srv_rpc = srv.get_public_rpc().await;
 		srv_rpc.initiate_lightning_payment(protos::InitiateLightningPaymentRequest {
+			intent_nonce: None,
+			source_owner_signature: Vec::new(),
 			invoice: invoice.to_string(),
 			htlc_vtxo_ids: self.vtxos.iter().map(|v| v.id().to_bytes().to_vec()).collect(),
 			payment_amount_sat: amount.to_sat(),
@@ -1694,6 +1697,7 @@ async fn rejected_accepted_invoice_releases_held_htlcs() {
 		description: None,
 		expiry_secs: None,
 		claim_pubkey: None,
+		ark_address_hint: false,
 	}).await.unwrap().into_inner().bolt11;
 	let invoice_delta = Bolt11Invoice::from_str(&bolt11).unwrap().min_final_cltv_expiry_delta();
 
@@ -1804,6 +1808,7 @@ async fn check_lightning_receive_returns_on_canceled_subscription() {
 		description: None,
 		expiry_secs: None,
 		claim_pubkey: None,
+		ark_address_hint: false,
 	}).await.unwrap();
 
 	let db = Db::connect(&srv.config().postgres.clone()).await.unwrap();
@@ -1885,6 +1890,7 @@ async fn start_keyless_receive(srv: &Captaind, amount: Amount) -> KeylessReceive
 		description: None,
 		expiry_secs: None,
 		claim_pubkey: None,
+		ark_address_hint: false,
 	}).await.unwrap().into_inner().bolt11;
 	KeylessReceive { invoice, payment_hash }
 }
@@ -2202,6 +2208,7 @@ async fn refuse_receive_claim_after_incoming_htlc_expiry() {
 			description: None,
 			expiry_secs: None,
 			claim_pubkey: None,
+			ark_address_hint: false,
 		})
 		.await
 		.expect("start receive failed")
@@ -2338,6 +2345,7 @@ async fn settled_hash_cannot_fund_new_receive() {
 			description: None,
 			expiry_secs: None,
 			claim_pubkey: None,
+			ark_address_hint: false,
 		})
 		.await
 		.expect_err("receive for an already-settled hash must be refused");
@@ -2373,6 +2381,7 @@ async fn prepare_lightning_claim_requires_the_claim_key() {
 		description: None,
 		expiry_secs: None,
 		claim_pubkey: Some(claim_key.public_key().serialize().to_vec()),
+		ark_address_hint: false,
 	};
 	let invoice = rpc.start_lightning_receive(start(&claim_key)).await.unwrap().into_inner().bolt11;
 	// starting it again returns the same receive, but not for another key
@@ -2492,6 +2501,7 @@ async fn settled_hash_cannot_be_granted_htlc_recv_vtxos() {
 		description: None,
 		expiry_secs: None,
 		claim_pubkey: None,
+		ark_address_hint: false,
 	}).await.expect("receive should be allowed while H is unsettled").into_inner().bolt11;
 
 	let pay_receive = {
@@ -2601,6 +2611,7 @@ async fn intra_ark_payment_refused_while_same_hash_send_is_open() {
 		description: None,
 		expiry_secs: None,
 		claim_pubkey: None,
+		ark_address_hint: false,
 	}).await.expect("receive should be allowed while H is unsettled").into_inner().bolt11;
 
 	let err = payer.try_pay_lightning(&receive_invoice, None, false).await
@@ -3171,7 +3182,7 @@ async fn check_lightning_receive_poll_interval_fallback() {
 
 	// Create a hold invoice on the server.
 	let resp = srv.start_lightning_receive(
-		payment_hash, btc(1), BlockDelta::new(18), None, None, None, None,
+		payment_hash, btc(1), BlockDelta::new(18), None, None, None, None, false,
 	).await.unwrap();
 
 	// Create a disconnected receiver: the sender is kept alive so
@@ -3224,7 +3235,7 @@ async fn check_lightning_receive_ignores_other_payment_updates() {
 	let preimage = ark::lightning::Preimage::from(rand::random::<[u8; 32]>());
 	let payment_hash = preimage.compute_payment_hash();
 	srv.start_lightning_receive(
-		payment_hash, btc(1), BlockDelta::new(18), None, None, None, None,
+		payment_hash, btc(1), BlockDelta::new(18), None, None, None, None, false,
 	).await.unwrap();
 
 	let (update_tx, mut update_rx) = tokio::sync::broadcast::channel::<PaymentHash>(16);
@@ -3293,6 +3304,7 @@ async fn refuse_receive_with_unlock_hash_as_payment_hash() {
 		description: None,
 		expiry_secs: None,
 		claim_pubkey: None,
+		ark_address_hint: false,
 	}).await.expect_err("must refuse a payment hash that is an existing unlock hash");
 	assert_eq!(err.code(), tonic::Code::InvalidArgument);
 	assert!(err.message().contains("unlock hash"), "unexpected error: {err:?}");
@@ -3319,6 +3331,7 @@ async fn invoice_expiry_is_chosen_by_the_client() {
 			description: None,
 			expiry_secs,
 			claim_pubkey: None,
+			ark_address_hint: false,
 		}).await.map(|r| Bolt11Invoice::from_str(&r.into_inner().bolt11).unwrap())
 	};
 
@@ -3381,7 +3394,7 @@ async fn refuse_send_with_unlock_hash_as_payment_hash() {
 }
 
 /// The `status` of the `lightning_htlc_subscription` row for `payment_hash`.
-async fn lightning_subscription_status(
+pub(crate) async fn lightning_subscription_status(
 	db: &Db,
 	payment_hash: ark::lightning::PaymentHash,
 ) -> Option<String> {
@@ -3433,7 +3446,7 @@ async fn cln_hold_status(
 }
 
 /// Whether a settlement (preimage) for `payment_hash` was recorded.
-async fn is_preimage_recorded(
+pub(crate) async fn is_preimage_recorded(
 	db: &Db,
 	payment_hash: ark::lightning::PaymentHash,
 ) -> bool {
@@ -3446,7 +3459,7 @@ async fn is_preimage_recorded(
 }
 
 /// Waits until the server's htlc subscription for `payment_hash` reaches `status`.
-async fn wait_for_subscription_status(
+pub(crate) async fn wait_for_subscription_status(
 	db: &Db,
 	payment_hash: ark::lightning::PaymentHash,
 	status: &str,
@@ -3578,7 +3591,7 @@ async fn successful_xpay_records_the_preimage() {
 	}.wait(wait_timeout()).await;
 }
 
-async fn wait_for_hold_invoice_accepted(
+pub(crate) async fn wait_for_hold_invoice_accepted(
 	hold_client: &mut hold::hold_client::HoldClient<tonic::transport::Channel>,
 	payment_hash: ark::lightning::PaymentHash,
 ) {
@@ -3690,6 +3703,7 @@ async fn prevent_double_pay_via_canceled_subscription_and_inflight_xpay() {
 			description: None,
 			expiry_secs: None,
 			claim_pubkey: None,
+			ark_address_hint: false,
 		}).await.unwrap().into_inner().bolt11;
 
 	// 4. Pay invoice-2 from Eve's node. The HTLC is held by the server's
@@ -3813,6 +3827,7 @@ async fn self_payment_claim_rejected_after_sender_onchain_refund() {
 		description: None,
 		expiry_secs: None,
 		claim_pubkey: None,
+		ark_address_hint: false,
 	}).await.unwrap().into_inner().bolt11;
 
 	let sender_key = Keypair::new(&SECP, &mut bip39::rand::thread_rng());
@@ -3822,6 +3837,8 @@ async fn self_payment_claim_rejected_after_sender_onchain_refund() {
 	wallet.register_vtxo_transactions_with_server(&htlcs).await.unwrap();
 
 	rpc.initiate_lightning_payment(protos::InitiateLightningPaymentRequest {
+		intent_nonce: None,
+		source_owner_signature: Vec::new(),
 		invoice,
 		payment_amount_sat: 100_000,
 		htlc_vtxo_ids: htlcs.iter().map(|v| v.id().to_bytes().to_vec()).collect(),
@@ -4004,7 +4021,7 @@ async fn late_xpay_result_does_not_finalize_a_retry() {
 	let retry_id = db.write(async |t| {
 		let retry_id = t.store_lightning_payment_start(
 			first.lightning_node_id, &invoice, sat(10_000), None, &[], None,
-			first.block_height.unwrap(), sat(0), None, Duration::from_secs(3600), Some(sat(1_000)),
+			first.block_height.unwrap(), sat(0), None, Duration::from_secs(3600), Some(sat(1_000)), None,
 		).await?;
 		xpay::create_xpay(&**t, &xpay::NewClnXpay {
 			lightning_node_id: first.lightning_node_id,

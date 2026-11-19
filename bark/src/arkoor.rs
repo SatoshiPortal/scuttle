@@ -7,6 +7,7 @@ use log::{error, info, warn};
 use ark::{ProtocolEncoding, VtxoPolicy};
 use ark::arkoor::ArkoorDestination;
 use ark::arkoor::package::{ArkoorPackageBuilder, ArkoorPackageCosignResponse};
+use ark::lightning::{Bolt11Invoice, PaymentHash};
 use ark::vtxo::{Full, Vtxo, VtxoId};
 use server_rpc::{protos, ServerConnection};
 
@@ -32,6 +33,8 @@ pub enum ArkoorAddressError {
 	PolicyNotSupported(VtxoPolicy),
 	#[error("Unknown delivery mechanism: {0}")]
 	UnknownDeliveryMechanism(String),
+	#[error("Address must have one server mailbox delivery")]
+	MailboxDeliveryRequired,
 	#[error("Other error: {0}")]
 	Other(String),
 }
@@ -186,6 +189,13 @@ impl Wallet {
 		}
 
 		check_delivery(address.delivery())?;
+		// A server in expiry payout mode binds the output to the mailbox of
+		// the address.
+		if self.expiry_payouts().await
+			&& !matches!(address.delivery(), [VtxoDelivery::ServerMailbox { .. }])
+		{
+			return Err(ArkoorAddressError::MailboxDeliveryRequired);
+		}
 
 		Ok(())
 	}
@@ -203,6 +213,8 @@ impl Wallet {
 		inputs: impl IntoIterator<Item = WalletVtxo>,
 		change_keypair: Keypair,
 		change_pieces: Option<Vec<Amount>>,
+		destination_address: Option<&ark::Address>,
+		paid_invoice: Option<PaymentHash>,
 	) -> anyhow::Result<ArkoorCreateResult> {
 		let (mut srv, _) = self.require_server().await?;
 		let input_ids = inputs.into_iter().map(|v| v.id()).collect::<Vec<_>>();
@@ -252,11 +264,20 @@ impl Wallet {
 			.generate_user_nonces(&user_keypairs)
 			.context("invalid nb of keypairs")?;
 
-		let cosign_request = protos::ArkoorPackageCosignRequest::from(
+		let mut cosign_request = protos::ArkoorPackageCosignRequest::from(
 			builder.cosign_request(),
 		);
+		self.bind_output_mailboxes(&mut cosign_request.parts, destination_address).await?;
 
-		let response = srv.client.request_arkoor_cosign(cosign_request).await
+		let response = match paid_invoice {
+			Some(payment_hash) => srv.client.request_lightning_receive_arkoor_cosign(
+				protos::LightningReceiveArkoorCosignRequest {
+					payment_hash: payment_hash.to_vec(),
+					cosign_request: Some(cosign_request),
+				},
+			).await,
+			None => srv.client.request_arkoor_cosign(cosign_request).await,
+		}
 			.context("error requesting arkoor cosign")?
 			.into_inner();
 
@@ -297,7 +318,18 @@ impl Wallet {
 		destination: &ark::Address,
 		amount: Amount,
 	) -> anyhow::Result<MovementId> {
-		let action = start_arkoor_send(self, destination.clone(), amount).await?;
+		self.send_arkoor(destination, amount, None).await
+	}
+
+	/// [Self::send_arkoor_payment], which also pays `paid_invoice` if it is
+	/// specified.
+	pub(crate) async fn send_arkoor(
+		&self,
+		destination: &ark::Address,
+		amount: Amount,
+		paid_invoice: Option<Bolt11Invoice>,
+	) -> anyhow::Result<MovementId> {
+		let action = start_arkoor_send(self, destination.clone(), amount, paid_invoice).await?;
 		let action_id = action.id();
 
 		// Lock the action before its checkpoint exists. Otherwise a wallet sync

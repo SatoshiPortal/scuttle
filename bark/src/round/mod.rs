@@ -700,6 +700,39 @@ impl RoundState {
 	/// When success or failure is returned, the round state can be eliminated
 	//TODO(stevenroose) make RoundState manage its own db record
 	pub async fn sync(&mut self, wallet: &Wallet) -> anyhow::Result<RoundStatus> {
+		// A server in expiry payout mode cancels a participation when it
+		// pays out one of its inputs, and accepts no forfeit for it.
+		let awaits_forfeit = match self.flow {
+			RoundFlowState::NonInteractivePending { .. } => true,
+			RoundFlowState::Finished { .. } => !self.done,
+			_ => false,
+		};
+		if awaits_forfeit && wallet.has_expiry_payout_input(&self.participation).await? {
+			// A released participation already forfeited its inputs to this
+			// round. The wallet must still recover its output after a restart,
+			// even if a later expiry decision marked an old input paid out.
+			let released = if let Some(unlock_hash) = self.unlock_hash() {
+				let (mut srv, _) = wallet.require_server().await?;
+				let request = protos::RoundParticipationStatusRequest {
+					unlock_hash: unlock_hash.to_byte_array().to_vec(),
+					attestation: RoundParticipationStatusAttestation::new(
+						unlock_hash, &wallet.mailbox_keypair(),
+					).serialize(),
+				};
+				match srv.client.round_participation_status(request).await {
+					Ok(resp) => resp.into_inner().status == protos::RoundParticipationStatus::RoundPartReleased as i32,
+					Err(e) if e.code() == tonic::Code::NotFound => false,
+					Err(e) => return Err(e.into()),
+				}
+			} else {
+				false
+			};
+			if !released {
+				info!("Server pays out an input of this round at its expiry, canceling the round");
+				self.flow = RoundFlowState::Canceled;
+			}
+		}
+
 		match self.flow {
 			RoundFlowState::Finished { ref funding_tx, .. } if self.done => {
 				Ok(RoundStatus::Confirmed {
@@ -1862,7 +1895,7 @@ async fn persist_round_success(
 	let input_ids = participation.inputs.iter().map(|v| v.id()).collect::<Vec<_>>();
 	let spent_result = wallet.inner.db.steal_lock_to_spent(&input_ids).await
 		.context("failed to mark input VTXOs as spent");
-	let store_result = wallet.store_spendable_vtxos(new_vtxos).await
+	let store_result = wallet.store_round_outputs(new_vtxos).await
 		.context("failed to store new VTXOs");
 	let update_result = if let Some(mid) = movement_id {
 		wallet.inner.movements.finish_movement_with_update(
@@ -1879,6 +1912,7 @@ async fn persist_round_success(
 	store_result?;
 	spent_result?;
 	update_result?;
+	wallet.release_round_outputs(new_vtxos).await;
 
 	Ok(())
 }
@@ -2054,6 +2088,7 @@ impl Wallet {
 		movement_kind: Option<RoundMovement>,
 	) -> anyhow::Result<StoredRoundState> {
 		check_nb_inputs(&participation)?;
+		self.check_round_output_keys(&participation).await?;
 		let input_ids = participation.inputs.iter().map(|v| v.id()).collect::<Vec<_>>();
 
 		// The inputs are only locked at attempt start; here they must just
@@ -2105,6 +2140,7 @@ impl Wallet {
 		scheduled_height: Option<BlockHeight>,
 	) -> anyhow::Result<StoredRoundState<Unlocked>> {
 		check_nb_inputs(&participation)?;
+		self.check_round_output_keys(&participation).await?;
 		// The inputs are only locked once an attempt starts, so like an
 		// interactive registration this one just needs them spendable.
 		// Pending participations over the same inputs stand: the server drops

@@ -422,6 +422,7 @@ impl TestContext {
 		// NB we don't auto-complete `..Default::default()` here
 		// to force us to evaluate every value in test context.
 		server::config::Config {
+			expiry_payouts: false,
 			data_dir: data_dir.clone(),
 			network: Network::Regtest,
 			vtxo_lifetime: BlockDelta::new(432),
@@ -510,6 +511,7 @@ impl TestContext {
 			receive_htlc_forward_timeout: Duration::from_secs(30),
 			min_board_amount: Amount::from_sat(20_000),
 			ln_receive_anti_dos_required: false,
+			ln_receive_ark_address_hints: false,
 			round_status_attestation_required: false,
 			forfeit_attestation_required: false,
 			ln_max_fee_ppm: 900_000,
@@ -568,6 +570,7 @@ impl TestContext {
 				progress_grace_period: BlockDelta::new(2),
 				claim_chunksize: 15.try_into().unwrap(),
 				incremental_relay_fee: FeeRate::from_sat_per_kvb_ceil(100),
+				expiry_payout_max_fee_rate: FeeRate::from_sat_per_vb_u32(1000),
 				min_cpfp_amount: Amount::from_sat(10_000),
 			},
 			sweep_address: Some(sweep_address.to_string().parse().expect("invalid sweep address")),
@@ -642,6 +645,7 @@ impl TestContext {
 		#[allow(deprecated)]
 		bark::Config {
 			server_address: srv.ark_url(),
+			require_expiry_payouts: false,
 			server_access_token: None,
 			user_agent: None,
 			esplora_address: if bitcoind.is_none() {
@@ -669,6 +673,7 @@ impl TestContext {
 			daemon_manual_sync: false,
 			change_vtxo_split_factor: 2,
 			vtxo_key_gap_limit: bark::DEFAULT_VTXO_KEY_GAP_LIMIT,
+			lightning_ark_address_hints: false,
 		}
 	}
 

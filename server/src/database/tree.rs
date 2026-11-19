@@ -1,14 +1,18 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, bail};
 
 use bitcoin::{Transaction, Txid};
+use bitcoin::secp256k1::PublicKey;
 use tracing::debug;
 
-use ark::{ProtocolEncoding, ServerVtxo, Vtxo, VtxoId};
+use ark::{ProtocolEncoding, ServerVtxo, ServerVtxoPolicy, Vtxo, VtxoId, VtxoPolicy};
 use ark::vtxo::{Bare, Full};
 
+use crate::round::UNSPENDABLE;
+
 use super::model::{SpendState, VirtualTransaction};
+use super::Tx;
 
 // -- Update structs --
 
@@ -54,6 +58,21 @@ struct VtxoInserts {
 	anchor_points: Vec<String>,
 	spend_states: Vec<String>,
 	oor_spent_txids: Vec<Option<String>>,
+}
+
+/// The round output used only for padding has no owner to recover to.
+#[doc(hidden)]
+pub fn round_padding_policy() -> ServerVtxoPolicy {
+	ServerVtxoPolicy::User(VtxoPolicy::new_pubkey(*UNSPENDABLE))
+}
+
+/// Keep this classification aligned with the database's deferred check.
+#[doc(hidden)]
+pub fn vtxo_requires_owner_mailbox(state: SpendState, policy: &ServerVtxoPolicy) -> bool {
+	let held = matches!(state, SpendState::Spendable | SpendState::Unregistered
+		| SpendState::Unclaimed | SpendState::HtlcRecvUnclaimed);
+	let padding = state == SpendState::Unclaimed && policy == &round_padding_policy();
+	held && !padding && policy.user_pubkey().is_some()
 }
 
 impl VtxoInserts {
@@ -131,6 +150,20 @@ impl VtxoInserts {
 	fn is_empty(&self) -> bool {
 		self.vtxo_ids.is_empty()
 	}
+
+	/// The inserted VTXOs that an owner holds, each of which needs an owner
+	/// mailbox: the user VTXOs not spent at insertion, except round padding.
+	fn owned_vtxo_ids(&self) -> anyhow::Result<Vec<VtxoId>> {
+		let mut ret = Vec::new();
+		for ((id, state), policy) in self.vtxo_ids.iter().zip(&self.spend_states).zip(&self.policies) {
+			let state = state.parse::<SpendState>()?;
+			let policy = ServerVtxoPolicy::deserialize(policy)?;
+			if vtxo_requires_owner_mailbox(state, &policy) {
+				ret.push(id.parse()?);
+			}
+		}
+		Ok(ret)
+	}
 }
 
 struct VtxoUpdates {
@@ -156,6 +189,20 @@ impl VtxoUpdates {
 		}
 	}
 
+	/// The VTXOs that these updates spend or change.
+	fn changed_vtxo_ids(&self) -> Vec<VtxoId> {
+		let mut ids = self.oor_spends.iter().map(|s| s.vtxo_id)
+			.chain(self.round_spends.iter().map(|s| s.vtxo_id))
+			.chain(self.offboard_spends.iter().map(|s| s.vtxo_id))
+			.chain(self.round_forfeits.iter().map(|s| s.vtxo_id))
+			.chain(self.claims.iter().copied())
+			.chain(self.registrations.iter().copied())
+			.chain(self.provide_signatures.iter().map(|v| v.id()))
+			.collect::<Vec<_>>();
+		ids.sort_unstable();
+		ids.dedup();
+		ids
+	}
 }
 
 /// A batch update to the virtual transaction tree.
@@ -171,6 +218,7 @@ pub struct VtxoTreeUpdate {
 	tx_inserts: Vec<VirtualTransaction<'static>>,
 	vtxo_inserts: VtxoInserts,
 	vtxo_updates: VtxoUpdates,
+	owner_bindings: BTreeMap<VtxoId, PublicKey>,
 }
 
 impl VtxoTreeUpdate {
@@ -179,7 +227,19 @@ impl VtxoTreeUpdate {
 			tx_inserts: Vec::new(),
 			vtxo_inserts: VtxoInserts::new(),
 			vtxo_updates: VtxoUpdates::new(),
+			owner_bindings: BTreeMap::new(),
 		}
+	}
+
+	/// Set the owner mailbox of new VTXOs. In payout mode every new VTXO
+	/// that an owner holds needs one.
+	pub fn bind_owner_mailboxes(mut self, bindings: impl IntoIterator<Item = (VtxoId, PublicKey)>) -> anyhow::Result<Self> {
+		for (id, mailbox) in bindings {
+			if self.owner_bindings.insert(id, mailbox).is_some_and(|previous| previous != mailbox) {
+				bail!("conflicting mailbox bindings for VTXO {id}");
+			}
+		}
+		Ok(self)
 	}
 
 	// -- virtual tx upserts --
@@ -430,13 +490,19 @@ impl VtxoTreeUpdate {
 /// VTXO row was written, `0` means every insert hit `ON CONFLICT DO NOTHING`
 /// (i.e. an idempotent retry of an already-applied update).
 pub async fn execute_vtxo_tree_update(
-	tx: &tokio_postgres::Transaction<'_>,
+	tx: &Tx<'_>,
 	update: VtxoTreeUpdate,
 ) -> anyhow::Result<u64> {
 	debug_assert!(validate(&update).is_ok(), "{}", validate(&update).unwrap_err());
+	if tx.expiry_payouts() {
+		tx.guard_spend_changes(&update.vtxo_updates.changed_vtxo_ids()).await?;
+	}
 
 	upsert_virtual_transactions(tx, &update.tx_inserts).await?;
 	let inserted = insert_vtxos(tx, &update.vtxo_inserts).await?;
+	if tx.expiry_payouts() {
+		tx.store_vtxo_owner_mailboxes(&update.vtxo_inserts.owned_vtxo_ids()?, &update.owner_bindings).await?;
+	}
 	apply_vtxo_updates(tx, &update.vtxo_updates).await?;
 
 	Ok(inserted)

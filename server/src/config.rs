@@ -224,6 +224,10 @@ mod defaults {
 pub struct Config {
 	pub data_dir: PathBuf,
 	pub network: bitcoin::Network,
+	/// Pay each VTXO of an expired tree to the owner mailbox it records.
+	/// The mode is fixed when the database is created.
+	#[serde(default)]
+	pub expiry_payouts: bool,
 	/// The number of blocks after which a VTXO expires, by default 6*24*30 so that
 	/// a VTXO can live for up to 30 days.
 	pub vtxo_lifetime: BlockDelta,
@@ -422,6 +426,13 @@ pub struct Config {
 	/// provide a VTXO ownership proof, or a lightning receive token
 	/// when preparing a lightning claim.
 	pub ln_receive_anti_dos_required: bool,
+
+	/// Whether users can ask to have their Ark address put in the route
+	/// hints of their lightning receive invoices. Other users of this
+	/// server can then pay those invoices with an arkoor, without the
+	/// lightning send and receive fees.
+	#[serde(default)]
+	pub ln_receive_ark_address_hints: bool,
 
 	/// Indicates whether the Ark server requires clients to sign with the
 	/// participation's mailbox key when querying a round participation status.
