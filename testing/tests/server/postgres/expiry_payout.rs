@@ -4,12 +4,14 @@ use bitcoin::Txid;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
-use ark::ServerVtxo;
+use ark::{ServerVtxo, ServerVtxoPolicy, VtxoPolicy};
+use ark::encode::ProtocolEncoding;
 use ark::lightning::PaymentHash;
 use ark::test_util::VTXO_VECTORS;
 use bark::lightning_invoice::{Currency, InvoiceBuilder, PaymentSecret};
 use server::ExpiryPayoutRefusal;
-use server::database::{Db, SpendState};
+use server::database::{Db, SpendState, Tx};
+use server::database::expiry_payout::ownership::OwnerBindingMismatch;
 use server::database::htlc_vtxo::{self, HtlcDirection};
 use server::database::ln::LightningPaymentStatus;
 use server::database::tree::VtxoTreeUpdate;
@@ -27,6 +29,26 @@ async fn payout_db(name: &str) -> (TestContext, Db) {
 	Db::create_with_payouts(&postgres_cfg, true).await.expect("Database created");
 	let db = Db::connect(&postgres_cfg).await.expect("Connected to database");
 	(ctx, db)
+}
+
+/// Bypass the Rust tree writer to exercise the database backstop itself.
+async fn insert_raw_vtxo(t: &Tx<'_>, vtxo: &ServerVtxo<ark::vtxo::Full>, state: SpendState) -> anyhow::Result<()> {
+	let id = vtxo.id().to_string();
+	let txid = vtxo.point().txid.to_string();
+	let data = vtxo.serialize();
+	let expiry = vtxo.expiry_height().to_u32() as i32;
+	let exit_delta = vtxo.exit_delta().to_u16() as i32;
+	let policy_type = vtxo.policy_type().to_string();
+	let policy = vtxo.policy().serialize();
+	let server_pubkey = vtxo.server_pubkey().to_string();
+	let amount = vtxo.amount().to_sat() as i64;
+	let anchor = vtxo.chain_anchor().to_string();
+	t.execute("INSERT INTO vtxo (vtxo_id, vtxo_txid, vtxo, expiry, exit_delta, policy_type,
+		policy, server_pubkey, amount, anchor_point, spend_state, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::spend_state, NOW(), NOW())",
+		&[&id, &txid, &data, &expiry, &exit_delta, &policy_type, &policy,
+			&server_pubkey, &amount, &anchor, &state.as_str()]).await?;
+	Ok(())
 }
 
 /// A write that competes with an expiry decision.
@@ -145,6 +167,102 @@ async fn expiry_payout_vtxos_are_created_with_their_mailbox_once() {
 		.await).await.unwrap_err();
 	assert!(db.read(async |t| t.try_get_bare_vtxo_by_id(unbound.id()).await).await.unwrap().is_none());
 	assert!(row(&unbound).await.is_none());
+}
+
+/// A future write path that skips the Rust tree writer cannot commit an
+/// owner-held VTXO without a binding. Existing bindings cannot be changed.
+#[tokio::test]
+async fn expiry_payout_database_requires_immutable_owner_mailboxes() {
+	let (_ctx, db) = payout_db("expiry_payout_database_requires_immutable_owner_mailboxes").await;
+	let vtxo = ServerVtxo::from(VTXO_VECTORS.round2_vtxo.clone());
+	let id = vtxo.id().to_string();
+	let mailbox = test_server_mailbox_key().public_key().to_string();
+	let error = db.write(async |t| insert_raw_vtxo(t, &vtxo, SpendState::Spendable).await)
+		.await.expect_err("an owner VTXO without a binding must not commit");
+	assert!(error.is::<OwnerBindingMismatch>(), "{error:#}");
+	assert!(db.read(async |t| Ok(t.query_opt("SELECT id FROM vtxo WHERE vtxo_id=$1", &[&id]).await?.is_none()))
+		.await.unwrap(), "the failed commit must roll back the VTXO");
+
+	// The binding may follow the VTXO in the same transaction.
+	db.write(async |t| {
+		insert_raw_vtxo(t, &vtxo, SpendState::Spendable).await?;
+		t.execute("INSERT INTO vtxo_owner_mailbox(vtxo_id, mailbox_pk) VALUES($1, $2)", &[&id, &mailbox]).await?;
+		Ok(())
+	}).await.unwrap();
+	for sql in [
+		"UPDATE vtxo_owner_mailbox SET mailbox_pk=mailbox_pk WHERE vtxo_id=$1",
+		"DELETE FROM vtxo_owner_mailbox WHERE vtxo_id=$1",
+	] {
+		db.write(async |t| { t.execute(sql, &[&id]).await?; Ok(()) }).await.expect_err(sql);
+	}
+	db.write(async |t| { t.batch_execute("TRUNCATE vtxo_owner_mailbox").await?; Ok(()) })
+		.await.expect_err("bindings must not be truncated");
+	assert_eq!(db.read(async |t| Ok(t.query_one(
+		"SELECT mailbox_pk FROM vtxo_owner_mailbox WHERE vtxo_id=$1", &[&id],
+	).await?.get::<_, String>(0))).await.unwrap(), mailbox);
+
+	// A later transition to an owner-held state also needs a binding. A
+	// second update to 'spent' in the same transaction must not hide it.
+	let pool = ServerVtxo::from(VTXO_VECTORS.arkoor3_vtxo.clone());
+	let pool_id = pool.id().to_string();
+	db.write(async |t| insert_raw_vtxo(t, &pool, SpendState::Pool).await).await.unwrap();
+	let error = db.write(async |t| {
+		t.execute("UPDATE vtxo SET spend_state='spendable', updated_at=NOW() WHERE vtxo_id=$1", &[&pool_id]).await?;
+		t.execute("UPDATE vtxo SET spend_state='spent', updated_at=NOW() WHERE vtxo_id=$1", &[&pool_id]).await?;
+		Ok(())
+	}).await.expect_err("a transient owner-held state needs a binding");
+	assert!(error.is::<OwnerBindingMismatch>(), "{error:#}");
+	assert_eq!(db.read(async |t| Ok(t.query_one(
+		"SELECT spend_state::TEXT FROM vtxo WHERE vtxo_id=$1", &[&pool_id],
+	).await?.get::<_, String>(0))).await.unwrap(), "pool");
+}
+
+/// The SQL classification must agree with the Rust writer for every current
+/// policy tag and spend state. Unknown tags fail closed even in spent states.
+#[tokio::test]
+async fn expiry_payout_sql_owner_classification_matches_writer() {
+	let (_ctx, db) = payout_db("expiry_payout_sql_owner_classification_matches_writer").await;
+	let key = test_server_mailbox_key().public_key();
+	let padding_key = PublicKey::from_str("02dfa52f6690299d2d6a08323083e290597b56fee125063e5f4e2957731639c42c").unwrap();
+	let mut policies = Vec::new();
+	for tag in 0u8..=11 {
+		let mut bytes = vec![tag];
+		if tag != 4 && tag != 7 { bytes.extend_from_slice(&key.serialize()); }
+		if tag == 4 { bytes.extend_from_slice(&key.x_only_public_key().0.serialize()); }
+		if matches!(tag, 1 | 2 | 8 | 9) {
+			bytes.extend_from_slice(&[42; 32]); // payment hash
+			bytes.extend_from_slice(&1008u32.to_le_bytes());
+			if matches!(tag, 2 | 8) { bytes.extend_from_slice(&144u16.to_le_bytes()); }
+		}
+		if matches!(tag, 5 | 6 | 10 | 11) { bytes.extend_from_slice(&[43; 32]); }
+		ServerVtxoPolicy::deserialize(&bytes).expect("current policy encoding");
+		policies.push(bytes);
+	}
+	policies.push(ServerVtxoPolicy::User(VtxoPolicy::new_pubkey(padding_key)).serialize());
+	let states = [SpendState::Spendable, SpendState::Unregistered, SpendState::Unclaimed,
+		SpendState::HtlcRecvUnclaimed, SpendState::Spent, SpendState::Pool, SpendState::LnSpent,
+		SpendState::RoundForfeit, SpendState::OffboardForfeit, SpendState::OffboardConnector];
+	db.read(async |t| {
+		for state in states {
+			for bytes in &policies {
+				let policy = ServerVtxoPolicy::deserialize(bytes).unwrap();
+				let held = matches!(state, SpendState::Spendable | SpendState::Unregistered
+					| SpendState::Unclaimed | SpendState::HtlcRecvUnclaimed);
+				let padding = state == SpendState::Unclaimed
+					&& policy == ServerVtxoPolicy::User(VtxoPolicy::new_pubkey(padding_key));
+				let expected = held && !padding && policy.user_pubkey().is_some();
+				let actual: bool = t.query_one("SELECT vtxo_requires_owner_mailbox($1::text::spend_state, $2::bytea)",
+					&[&state.as_str(), bytes]).await?.get(0);
+				assert_eq!(actual, expected, "state={state}, tag={}", bytes[0]);
+			}
+		}
+		for bytes in [vec![], vec![12]] {
+			let required: bool = t.query_one("SELECT vtxo_requires_owner_mailbox('pool', $1::bytea)",
+				&[&bytes]).await?.get(0);
+			assert!(required, "unknown policy must fail closed");
+		}
+		Ok(())
+	}).await.unwrap();
 }
 
 /// A VTXO decided for an expiry payout refuses every tree writer that

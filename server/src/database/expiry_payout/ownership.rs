@@ -8,6 +8,7 @@ use std::str::FromStr;
 use anyhow::Context;
 use bitcoin::{Amount, OutPoint};
 use bitcoin::secp256k1::PublicKey;
+use tokio_postgres::error::SqlState;
 
 use ark::{ServerVtxoPolicy, VtxoId, VtxoPolicy};
 use ark::lightning::PaymentHash;
@@ -34,6 +35,17 @@ impl fmt::Display for OwnerBindingMismatch {
 }
 
 impl std::error::Error for OwnerBindingMismatch {}
+
+impl OwnerBindingMismatch {
+	/// Recognize the deferred check without treating other constraint or
+	/// commit errors as a recoverable missing binding.
+	pub(crate) fn is_constraint_violation(error: &tokio_postgres::Error) -> bool {
+		error.as_db_error().is_some_and(|error| {
+			error.code() == &SqlState::FOREIGN_KEY_VIOLATION
+				&& error.constraint() == Some("vtxo_require_owner_mailbox")
+		})
+	}
+}
 
 /// A replay tried to change the owner mailbox of an existing VTXO.
 /// The original binding remains in place. This is a precondition failure

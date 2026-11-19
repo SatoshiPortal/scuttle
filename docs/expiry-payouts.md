@@ -16,6 +16,12 @@ Set `expiry_payouts = true` in the captaind configuration before you create the
 server database. The mode is fixed when the database is created: a database
 created without expiry payouts stays in upstream mode.
 
+For owner-held VTXOs written after this database migration, PostgreSQL requires
+an owner mailbox binding before commit and prevents changes to stored bindings.
+This checks that a binding exists, not that it identifies the right owner.
+Audit older VTXOs separately. Before a board is registered, its funding output
+uses `board_exit.owner_mailbox` and is outside this VTXO check.
+
 Run watchmand against the same database. `expiry_payout_max_fee_rate` in the
 watchmand configuration sets the highest feerate of a payout transaction and of
 its replacements. The watchman pays the miner fee from the value that the
