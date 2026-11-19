@@ -256,7 +256,7 @@ async fn expiry_payout_sql_owner_classification_matches_writer() {
 				assert_eq!(actual, expected, "state={state}, tag={}", bytes[0]);
 			}
 		}
-		for bytes in [vec![], vec![12]] {
+		for bytes in [Vec::<u8>::new(), vec![12u8]] {
 			let required: bool = t.query_one("SELECT vtxo_requires_owner_mailbox('pool', $1::bytea)",
 				&[&bytes]).await?.get(0);
 			assert!(required, "unknown policy must fail closed");
