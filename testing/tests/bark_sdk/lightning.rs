@@ -501,7 +501,7 @@ async fn pay_with_retry_for() {
 }
 
 /// A server that lets users put their Ark address in invoices, and two
-/// wallets on it that use it.
+/// wallets on it that use it, as wallets do by default.
 async fn ark_address_hint_setup(
 	ctx: &TestContext, expiry_payouts: bool,
 ) -> (LightningPaymentSetup, Arc<Captaind>, bark::Wallet, bark::Wallet) {
@@ -513,12 +513,9 @@ async fn ark_address_hint_setup(
 		})
 		.create().await;
 	srv.wait_for_vtxopool(ctx).await;
-	let payer = ctx.bark_sdk("payer", &srv).boarded(sat(400_000))
-		.cfg(|cfg| cfg.lightning_ark_address_hints = true)
-		.create().await;
-	let receiver = ctx.bark_sdk("receiver", &srv)
-		.cfg(|cfg| cfg.lightning_ark_address_hints = true)
-		.create().await;
+	let payer = ctx.bark_sdk("payer", &srv).boarded(sat(400_000)).create().await;
+	let receiver = ctx.bark_sdk("receiver", &srv).create().await;
+	assert!(payer.config().lightning_ark_address_hints && receiver.config().lightning_ark_address_hints);
 	lightning.sync().await;
 	(lightning, srv, payer, receiver)
 }
@@ -604,15 +601,16 @@ async fn external_payer_pays_invoice_with_ark_address() {
 	assert!(matches!(claimed.unwrap(), LightningReceiveState::Settled(_)));
 }
 
-/// A wallet that doesn't pay Ark addresses pays the invoice over
-/// lightning, and the wallet that didn't ask for an Ark address gets an
-/// invoice without one.
+/// A wallet that turns Ark address hints off pays the invoice over
+/// lightning, as upstream does, and gets invoices without an Ark address.
 #[tokio::test]
-async fn ark_address_hints_are_opt_in() {
-	let ctx = TestContext::new("bark_sdk/ark_address_hints_are_opt_in").await;
+async fn ark_address_hints_can_be_turned_off() {
+	let ctx = TestContext::new("bark_sdk/ark_address_hints_can_be_turned_off").await;
 	let (_lightning, srv, _payer, receiver) = ark_address_hint_setup(&ctx, false).await;
 
-	let other = ctx.bark_sdk("other", &srv).boarded(sat(400_000)).create().await;
+	let other = ctx.bark_sdk("other", &srv).boarded(sat(400_000))
+		.cfg(|cfg| cfg.lightning_ark_address_hints = false)
+		.create().await;
 	let invoice = other.bolt11_invoice(sat(10_000), None, None).await.unwrap();
 	assert_eq!(invoice.ark_address(), None);
 
@@ -653,10 +651,7 @@ async fn ark_address_payment_binds_the_receivers_mailbox() {
 /// test asks it to, so it claims no receive by itself.
 async fn manual_hint_receiver(ctx: &TestContext, srv: &Captaind) -> bark::Wallet {
 	ctx.bark_sdk("manual_receiver", srv)
-		.cfg(|cfg| {
-			cfg.lightning_ark_address_hints = true;
-			cfg.daemon_manual_sync = true;
-		})
+		.cfg(|cfg| cfg.daemon_manual_sync = true)
 		.create().await
 }
 
