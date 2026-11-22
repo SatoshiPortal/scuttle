@@ -837,6 +837,49 @@ async fn ark_address_receive_is_credited_only_for_its_amount() {
 	assert_eq!(assert_balance_consistent(&receiver, false).await.spendable, amount + sat(1_000));
 }
 
+/// A receive that an arkoor settled is not cancelled: the server refuses the
+/// cancel, and the wallet keeps the receive to credit the arkoor once it
+/// arrives. An unpaid receive is still cancelled although the server does
+/// not cancel its hold invoice.
+#[tokio::test]
+async fn ark_address_receive_paid_by_arkoor_is_not_cancelled() {
+	let ctx = TestContext::new("bark_sdk/ark_address_receive_paid_by_arkoor_is_not_cancelled").await;
+	let (_lightning, srv, payer, _) = ark_address_hint_setup(&ctx, false).await;
+	let receiver = manual_hint_receiver(&ctx, &srv).await;
+	let amount = sat(100_000);
+
+	let unpaid = receiver.bolt11_invoice(amount, None, None).await.unwrap();
+	receiver.cancel_lightning_receive(PaymentHash::from(&unpaid)).await.unwrap();
+	receiver.lightning_receive_state(PaymentHash::from(&unpaid)).await
+		.expect_err("the unpaid receive is cancelled");
+
+	let invoice = receiver.bolt11_invoice(amount, None, None).await.unwrap();
+	let hash = PaymentHash::from(&invoice);
+	let address = invoice.ark_address().unwrap();
+	let (arkoor, key) = arkoor_to_invoice_address(&payer, &invoice).await;
+	let response = srv.get_public_rpc().await
+		.request_lightning_receive_arkoor_cosign(invoice_arkoor(hash, &arkoor)).await.unwrap().into_inner();
+	let error = receiver.cancel_lightning_receive(hash).await.expect_err("an arkoor settled the receive");
+	assert!(format!("{error:#}").contains("SETTLED"), "{error:#}");
+	assert!(matches!(receiver.lightning_receive_state(hash).await.unwrap(), LightningReceiveState::InProgress(_)));
+
+	let vtxos = arkoor.user_cosign(&[key], ArkoorPackageCosignResponse::try_from(response).unwrap()).unwrap()
+		.build_signed_vtxos();
+	payer.register_vtxo_transactions_with_server(&vtxos).await.unwrap();
+	let Some(VtxoDelivery::ServerMailbox { blinded_id }) = address.delivery().first() else {
+		panic!("the Ark address of the invoice has no mailbox");
+	};
+	srv.get_mailbox_public_rpc().await.post_arkoor_message(protos::mailbox_server::PostArkoorMessageRequest {
+		blinded_id: blinded_id.as_ref().to_vec(),
+		vtxos: vtxos.iter().filter(|v| v.policy() == address.policy()).map(|v| v.serialize()).collect(),
+	}).await.unwrap();
+	receiver.sync().await;
+	match receiver.lightning_receive_state(hash).await.unwrap() {
+		LightningReceiveState::Settled(settled) => assert_eq!(settled.amount, amount),
+		other => panic!("receive not settled: {:?}", other),
+	}
+}
+
 /// Holds the reply to the first receive claim forever, after the server
 /// handled the claim.
 #[derive(Clone)]

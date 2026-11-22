@@ -397,13 +397,30 @@ impl Wallet {
 
 		match recv.progress {
 			Progress::AwaitingPayment => {
-				// Best-effort server cancel: an abandoned hold invoice just
-				// expires server-side, so don't fail the local cancel on error.
-				if let Ok((mut srv, _)) = self.require_server().await {
-					if let Err(e) = srv.client.cancel_lightning_receive(
-						protos::CancelLightningReceiveRequest { payment_hash: hash.to_vec() },
-					).await {
-						warn!("server did not cancel lightning receive {}: {}", hash, e);
+				// An abandoned hold invoice just expires server-side, so a
+				// server that does not cancel it is no reason to keep the
+				// receive. A payment can still arrive without this wallet, an
+				// arkoor on the Ark address of the invoice for example, so drop
+				// the receive only once the server cancelled it or still
+				// reports it unpaid. Else the payment could no longer be
+				// followed.
+				let (mut srv, _) = self.require_server().await
+					.context("cannot cancel: the Ark server is unreachable")?;
+				if let Err(e) = srv.client.cancel_lightning_receive(
+					protos::CancelLightningReceiveRequest { payment_hash: hash.to_vec() },
+				).await {
+					warn!("server did not cancel lightning receive {}: {}", hash, e);
+					let status = srv.client.check_lightning_receive(protos::CheckLightningReceiveRequest {
+						hash: hash.to_vec(),
+						wait: false,
+					}).await.context("cannot cancel: failed to read the receive from the Ark server")?
+						.into_inner().status;
+					if status != protos::LightningReceiveStatus::Created as i32 {
+						let status = protos::LightningReceiveStatus::try_from(status)
+							.map(|s| s.as_str_name()).unwrap_or("UNKNOWN");
+						bail!("cannot cancel: the Ark server did not cancel the receive and reports it {}",
+							status,
+						);
 					}
 				}
 				checkpoint.finish(self).await
