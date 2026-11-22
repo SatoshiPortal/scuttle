@@ -475,6 +475,7 @@ pub(crate) async fn start_lightning_receive(
 
 	// Other users of the server pay the Ark address in the invoice instead
 	// of the invoice, so it must be ours, or the destination we asked for.
+	// A forwarded receive takes no other address.
 	if let Some(hint) = hint_address.as_ref() {
 		if invoice.ark_address().as_ref() != Some(hint) {
 			bail!("Ark server returned an invoice without the Ark address of the destination, \
@@ -482,6 +483,11 @@ pub(crate) async fn start_lightning_receive(
 			);
 		}
 	} else if let Some(address) = invoice.ark_address() {
+		if claim_destination.is_some() {
+			bail!("Ark server returned a forwarded invoice with an Ark address we did not ask for: {}",
+				address,
+			);
+		}
 		if address != wallet.peek_address(key_index).await? {
 			bail!("Ark server returned an invoice with an Ark address that is not ours: {}", address);
 		}
@@ -551,7 +557,10 @@ async fn check_incoming_lightning_payment(
 		protos::LightningReceiveStatus::HtlcsReady => IncomingStatus::Ready,
 		protos::LightningReceiveStatus::Created => IncomingStatus::Pending,
 		protos::LightningReceiveStatus::Canceled => IncomingStatus::Canceled,
-		protos::LightningReceiveStatus::Settled if recv.invoice.ark_address().is_some() => {
+		// An arkoor pays a forwarded receive only on its destination.
+		protos::LightningReceiveStatus::Settled if recv.invoice.ark_address().is_some()
+			&& recv.claim_destination.iter().all(|d| recv.invoice.ark_address().as_ref() == Some(d))
+		=> {
 			IncomingStatus::PaidByArkoor { delivered: sub.delivered }
 		},
 		// We never claimed, yet the server has the preimage. Polling

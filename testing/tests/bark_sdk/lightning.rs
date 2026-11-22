@@ -880,6 +880,43 @@ async fn ark_address_receive_paid_by_arkoor_is_not_cancelled() {
 	}
 }
 
+/// Asks the server for the Ark address of the claim key in every invoice,
+/// as a server that ignores the request of the wallet would.
+#[derive(Clone)]
+struct ForceOwnAddressHint;
+
+#[async_trait::async_trait]
+impl captaind::proxy::ArkRpcProxy for ForceOwnAddressHint {
+	async fn start_lightning_receive(
+		&self, upstream: &mut ArkClient, mut req: protos::StartLightningReceiveRequest,
+	) -> Result<protos::StartLightningReceiveResponse, tonic::Status> {
+		req.ark_address_hint = true;
+		req.hint_address = None;
+		Ok(upstream.start_lightning_receive(req).await?.into_inner())
+	}
+}
+
+/// A forwarded receive takes no Ark address in its invoice but the address
+/// of its destination. The address of its own claim key would let an arkoor
+/// pay the forwarding wallet instead of the destination.
+#[tokio::test]
+async fn forwarded_receive_refuses_an_ark_address_it_did_not_ask_for() {
+	let ctx = TestContext::new("bark_sdk/forwarded_receive_refuses_an_ark_address_it_did_not_ask_for").await;
+	let (_lightning, srv, _payer, receiver) = ark_address_hint_setup(&ctx, false).await;
+	let proxy = srv.start_proxy_no_mailbox(ForceOwnAddressHint).await;
+	let forwarder = ctx.bark_sdk("forwarder", &proxy).create().await;
+	let destination = receiver.new_address().await.unwrap();
+
+	let error = forwarder.bolt11_invoice_builder().amount(sat(50_000)).claim_destination(destination)
+		.build().await.expect_err("the invoice carries the address of the claim key");
+	assert!(format!("{error:#}").contains("did not ask for"), "{error:#}");
+	assert!(forwarder.pending_lightning_receives().await.unwrap().is_empty());
+
+	// A receive without a destination still gets its own address.
+	let invoice = forwarder.bolt11_invoice(sat(50_000), None, None).await.unwrap();
+	assert!(invoice.ark_address().is_some());
+}
+
 /// Holds the reply to the first receive claim forever, after the server
 /// handled the claim.
 #[derive(Clone)]
