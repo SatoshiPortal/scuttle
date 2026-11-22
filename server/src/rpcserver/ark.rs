@@ -640,6 +640,10 @@ impl rpc::server::ArkService for Server {
 		let claim_pubkey = req.claim_pubkey.as_deref()
 			.map(PublicKey::from_bytes)
 			.transpose()?;
+		let hint_address = req.hint_address.as_deref()
+			.map(ark::Address::from_str)
+			.transpose()
+			.map_err(|_| tonic::Status::invalid_argument("invalid hint_address"))?;
 
 		let resp = self.start_lightning_receive(
 			payment_hash,
@@ -650,6 +654,7 @@ impl rpc::server::ArkService for Server {
 			req.expiry_secs.map(Duration::from_secs),
 			claim_pubkey,
 			req.ark_address_hint,
+			hint_address,
 		).await.to_status()?;
 
 		Ok(tonic::Response::new(resp))

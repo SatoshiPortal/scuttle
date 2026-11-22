@@ -468,6 +468,13 @@ message StartLightningReceiveRequest {
 	// route hints, so a user of this server can pay it with an arkoor
 	// instead. A server that does not allow it ignores this field.
 	bool ark_address_hint = 1000;
+	// The Ark address to put in the route hints instead, for a receive that
+	// forwards its payment to that address. It must be a public key address
+	// of this server with a single mailbox delivery. An arkoor that pays the
+	// invoice pays this address, while the claim of a payment over lightning
+	// keeps claim_pubkey and mailbox_id. A server that does not allow route
+	// hints refuses it. Takes precedence over ark_address_hint.
+	optional string hint_address = 1001;
 }
 
 message StartLightningReceiveResponse {

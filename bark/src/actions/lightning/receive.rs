@@ -403,6 +403,7 @@ pub(crate) async fn start_lightning_receive(
 		// A forwarded receive must be claimed over lightning to reach its
 		// destination.
 		ark_address_hint: config.lightning_ark_address_hints && claim_destination.is_none(),
+		hint_address: None,
 	};
 
 	let resp = srv.client.start_lightning_receive(req).await?.into_inner();

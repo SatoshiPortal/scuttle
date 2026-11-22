@@ -1698,6 +1698,7 @@ async fn rejected_accepted_invoice_releases_held_htlcs() {
 		expiry_secs: None,
 		claim_pubkey: None,
 		ark_address_hint: false,
+		hint_address: None,
 	}).await.unwrap().into_inner().bolt11;
 	let invoice_delta = Bolt11Invoice::from_str(&bolt11).unwrap().min_final_cltv_expiry_delta();
 
@@ -1809,6 +1810,7 @@ async fn check_lightning_receive_returns_on_canceled_subscription() {
 		expiry_secs: None,
 		claim_pubkey: None,
 		ark_address_hint: false,
+		hint_address: None,
 	}).await.unwrap();
 
 	let db = Db::connect(&srv.config().postgres.clone()).await.unwrap();
@@ -1891,6 +1893,7 @@ async fn start_keyless_receive(srv: &Captaind, amount: Amount) -> KeylessReceive
 		expiry_secs: None,
 		claim_pubkey: None,
 		ark_address_hint: false,
+		hint_address: None,
 	}).await.unwrap().into_inner().bolt11;
 	KeylessReceive { invoice, payment_hash }
 }
@@ -2209,6 +2212,7 @@ async fn refuse_receive_claim_after_incoming_htlc_expiry() {
 			expiry_secs: None,
 			claim_pubkey: None,
 			ark_address_hint: false,
+			hint_address: None,
 		})
 		.await
 		.expect("start receive failed")
@@ -2346,6 +2350,7 @@ async fn settled_hash_cannot_fund_new_receive() {
 			expiry_secs: None,
 			claim_pubkey: None,
 			ark_address_hint: false,
+			hint_address: None,
 		})
 		.await
 		.expect_err("receive for an already-settled hash must be refused");
@@ -2382,6 +2387,7 @@ async fn prepare_lightning_claim_requires_the_claim_key() {
 		expiry_secs: None,
 		claim_pubkey: Some(claim_key.public_key().serialize().to_vec()),
 		ark_address_hint: false,
+		hint_address: None,
 	};
 	let invoice = rpc.start_lightning_receive(start(&claim_key)).await.unwrap().into_inner().bolt11;
 	// starting it again returns the same receive, but not for another key
@@ -2502,6 +2508,7 @@ async fn settled_hash_cannot_be_granted_htlc_recv_vtxos() {
 		expiry_secs: None,
 		claim_pubkey: None,
 		ark_address_hint: false,
+		hint_address: None,
 	}).await.expect("receive should be allowed while H is unsettled").into_inner().bolt11;
 
 	let pay_receive = {
@@ -2612,6 +2619,7 @@ async fn intra_ark_payment_refused_while_same_hash_send_is_open() {
 		expiry_secs: None,
 		claim_pubkey: None,
 		ark_address_hint: false,
+		hint_address: None,
 	}).await.expect("receive should be allowed while H is unsettled").into_inner().bolt11;
 
 	let err = payer.try_pay_lightning(&receive_invoice, None, false).await
@@ -3182,7 +3190,7 @@ async fn check_lightning_receive_poll_interval_fallback() {
 
 	// Create a hold invoice on the server.
 	let resp = srv.start_lightning_receive(
-		payment_hash, btc(1), BlockDelta::new(18), None, None, None, None, false,
+		payment_hash, btc(1), BlockDelta::new(18), None, None, None, None, false, None,
 	).await.unwrap();
 
 	// Create a disconnected receiver: the sender is kept alive so
@@ -3235,7 +3243,7 @@ async fn check_lightning_receive_ignores_other_payment_updates() {
 	let preimage = ark::lightning::Preimage::from(rand::random::<[u8; 32]>());
 	let payment_hash = preimage.compute_payment_hash();
 	srv.start_lightning_receive(
-		payment_hash, btc(1), BlockDelta::new(18), None, None, None, None, false,
+		payment_hash, btc(1), BlockDelta::new(18), None, None, None, None, false, None,
 	).await.unwrap();
 
 	let (update_tx, mut update_rx) = tokio::sync::broadcast::channel::<PaymentHash>(16);
@@ -3305,6 +3313,7 @@ async fn refuse_receive_with_unlock_hash_as_payment_hash() {
 		expiry_secs: None,
 		claim_pubkey: None,
 		ark_address_hint: false,
+		hint_address: None,
 	}).await.expect_err("must refuse a payment hash that is an existing unlock hash");
 	assert_eq!(err.code(), tonic::Code::InvalidArgument);
 	assert!(err.message().contains("unlock hash"), "unexpected error: {err:?}");
@@ -3332,6 +3341,7 @@ async fn invoice_expiry_is_chosen_by_the_client() {
 			expiry_secs,
 			claim_pubkey: None,
 			ark_address_hint: false,
+			hint_address: None,
 		}).await.map(|r| Bolt11Invoice::from_str(&r.into_inner().bolt11).unwrap())
 	};
 
@@ -3704,6 +3714,7 @@ async fn prevent_double_pay_via_canceled_subscription_and_inflight_xpay() {
 			expiry_secs: None,
 			claim_pubkey: None,
 			ark_address_hint: false,
+			hint_address: None,
 		}).await.unwrap().into_inner().bolt11;
 
 	// 4. Pay invoice-2 from Eve's node. The HTLC is held by the server's
@@ -3828,6 +3839,7 @@ async fn self_payment_claim_rejected_after_sender_onchain_refund() {
 		expiry_secs: None,
 		claim_pubkey: None,
 		ark_address_hint: false,
+		hint_address: None,
 	}).await.unwrap().into_inner().bolt11;
 
 	let sender_key = Keypair::new(&SECP, &mut bip39::rand::thread_rng());
