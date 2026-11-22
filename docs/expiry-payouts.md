@@ -174,12 +174,16 @@ the REST request, the invoice carries the destination address in its route
 hints. The wallet sends it as `hint_address` in `StartLightningReceive`. The
 server checks that it is a public key address of the server with a single
 mailbox delivery. The claim key and the mailbox of the receive stay those of
-the forwarding wallet, for a payment over Lightning.
+the forwarding wallet, for a payment over Lightning. The wallet refuses an
+invoice with any other Ark address.
 
 An arkoor that pays the invoice must pay the key of the destination address.
 In expiry payout mode it must bind the output to the mailbox of that address,
 which the server unblinds with its mailbox key. The arkoor never reaches the
 forwarding wallet.
+
+A receive waiting for payment is cancelled only when the server cancels it or
+still reports it unpaid. An arkoor can pay the invoice without the wallet.
 
 ## Delivery of an arkoor payment
 
@@ -198,6 +202,8 @@ that no arkoor settled.
 A forwarded receive paid by arkoor is in the state `AwaitingDelivery` while the
 server reports `delivered = false`. The REST state is `awaiting-delivery`. The
 receive settles once the server reports `delivered = true`, or right away when
-the server does not track delivery. A forwarded receive paid over Lightning
+the server does not track delivery. The barkd daemon asks the server at each
+sync, every `daemon_sync_interval_secs`, 60 seconds by default. A forwarding
+service that waits for the receive sets a short interval, such as 5 seconds. A forwarded receive paid over Lightning
 settles after the forwarding wallet posts the claim to the mailbox of the
 destination.
