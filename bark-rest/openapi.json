@@ -1585,7 +1585,7 @@
           "lightning"
         ],
         "summary": "Create a BOLT11 invoice for an Ark address",
-        "description": "Generates a new BOLT11 invoice. When paid, the wallet claims the Lightning receive and forwards the resulting Ark VTXO to the supplied Ark address mailbox. The invoice expires after `expiry_secs` if given, otherwise after the Ark server's invoice expiry, which is also the longest it accepts.",
+        "description": "Generates a new BOLT11 invoice. When paid, the wallet claims the Lightning receive and forwards the resulting Ark VTXO to the supplied Ark address mailbox. The invoice expires after `expiry_secs` if given, otherwise after the Ark server's invoice expiry, which is also the longest it accepts. With `ark_address_hint`, the invoice also carries the Ark address, and a wallet on the same Ark server can pay it with an arkoor straight to that address.",
         "operationId": "generate_invoice_for_address",
         "requestBody": {
           "content": {
@@ -6470,6 +6470,10 @@
             "description": "The amount to create invoice for (in satoshis).",
             "minimum": 0
           },
+          "ark_address_hint": {
+            "type": "boolean",
+            "description": "Put `address` in the route hints of the invoice, so a wallet on the\nsame Ark server can pay it with an arkoor straight to `address`. The\nArk server must allow route hints. The receive is then in\n`awaiting-delivery` until the server reports the arkoor delivered to\nthe mailbox of `address`, and then settled."
+          },
           "description": {
             "type": [
               "string",
@@ -6690,6 +6694,7 @@
           "htlcs-ready",
           "preimage-revealed",
           "delivering",
+          "awaiting-delivery",
           "settled",
           "other"
         ]

@@ -8,6 +8,7 @@
 | HtlcsReady | htlcs-ready |
 | PreimageRevealed | preimage-revealed |
 | Delivering | delivering |
+| AwaitingDelivery | awaiting-delivery |
 | Settled | settled |
 | Other | other |
 

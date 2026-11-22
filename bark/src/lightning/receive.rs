@@ -34,6 +34,7 @@ pub struct Bolt11InvoiceBuilder<'a> {
 	expiry: Option<Duration>,
 	token: Option<String>,
 	claim_destination: Option<ark::Address>,
+	destination_hint: bool,
 }
 
 impl<'a> Bolt11InvoiceBuilder<'a> {
@@ -45,6 +46,7 @@ impl<'a> Bolt11InvoiceBuilder<'a> {
 			expiry: None,
 			token: None,
 			claim_destination: None,
+			destination_hint: false,
 		}
 	}
 
@@ -107,6 +109,22 @@ impl<'a> Bolt11InvoiceBuilder<'a> {
 		self
 	}
 
+	/// Put the Ark address of the claim destination in the route hints of
+	/// the invoice. A wallet on the same Ark server can then pay the
+	/// destination with an arkoor instead of over Lightning, and the
+	/// payment never goes through this wallet. Requires a claim destination
+	/// and a server that allows route hints.
+	///
+	/// The receive of an invoice paid this way settles once the server
+	/// reports the arkoor delivered to the mailbox of the destination, or
+	/// right away if the server does not track delivery. A receive without
+	/// a claim destination follows [crate::Config::lightning_ark_address_hints]
+	/// instead.
+	pub fn destination_hint(mut self, destination_hint: bool) -> Self {
+		self.destination_hint = destination_hint;
+		self
+	}
+
 	/// Mint the invoice and persist an `AwaitingPayment` checkpoint for it.
 	///
 	/// This does not wait for payment. The background sync (or an explicit
@@ -116,7 +134,7 @@ impl<'a> Bolt11InvoiceBuilder<'a> {
 		let amount = self.amount.context("an invoice amount is required")?;
 		let start = start_lightning_receive(
 			self.wallet, amount, self.description, self.expiry, self.token,
-			self.claim_destination,
+			self.claim_destination, self.destination_hint,
 		).await?;
 		let invoice = start.invoice.clone();
 		let mut checkpoint = self.wallet.try_lock_action::<LightningReceive>(&start.id()).await?
@@ -193,6 +211,10 @@ impl Wallet {
 		let mut rest = vtxos.to_vec();
 		for recv in self.pending_lightning_receives().await? {
 			if recv.progress != Progress::AwaitingPayment || recv.invoice.ark_address().is_none() {
+				continue;
+			}
+			// The arkoor of a forwarded receive pays its destination.
+			if recv.claim_destination.is_some() {
 				continue;
 			}
 
@@ -387,6 +409,9 @@ impl Wallet {
 			},
 			Progress::PreimageRevealed(_) | Progress::Delivering(_) => {
 				bail!("cannot cancel: preimage has already been revealed");
+			},
+			Progress::AwaitingDelivery => {
+				bail!("cannot cancel: the invoice was paid by arkoor");
 			},
 		}
 	}

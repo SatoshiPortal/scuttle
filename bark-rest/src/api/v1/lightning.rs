@@ -100,7 +100,9 @@ pub async fn generate_invoice(
 	description = "Generates a new BOLT11 invoice. When paid, the wallet claims the Lightning \
 		receive and forwards the resulting Ark VTXO to the supplied Ark address mailbox. \
 		The invoice expires after `expiry_secs` if given, otherwise after the Ark server's \
-		invoice expiry, which is also the longest it accepts.",
+		invoice expiry, which is also the longest it accepts. With `ark_address_hint`, the \
+		invoice also carries the Ark address, and a wallet on the same Ark server can pay \
+		it with an arkoor straight to that address.",
 	tag = "lightning"
 )]
 #[debug_handler]
@@ -118,6 +120,7 @@ pub async fn generate_invoice_for_address(
 	let invoice = wallet.bolt11_invoice_builder()
 		.amount(amount)
 		.claim_destination(address)
+		.destination_hint(body.ark_address_hint)
 		.description(body.description)
 		.expiry(body.expiry_secs.map(Duration::from_secs))
 		.build().await

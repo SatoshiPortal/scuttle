@@ -633,6 +633,13 @@ pub struct LightningInvoiceForAddressRequest {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	#[cfg_attr(feature = "utoipa", schema(minimum = 1))]
 	pub expiry_secs: Option<u64>,
+	/// Put `address` in the route hints of the invoice, so a wallet on the
+	/// same Ark server can pay it with an arkoor straight to `address`. The
+	/// Ark server must allow route hints. The receive is then in
+	/// `awaiting-delivery` until the server reports the arkoor delivered to
+	/// the mailbox of `address`, and then settled.
+	#[serde(default)]
+	pub ark_address_hint: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1086,5 +1093,19 @@ mod test {
 
 		assert_eq!(read_back.pay_invoice, Some(false));
 		assert_eq!(read_back.allowed(), methods.allowed());
+	}
+
+	/// A request from a client that does not know the hint asks for none.
+	#[test]
+	fn invoice_for_address_asks_for_no_hint_by_default() {
+		let request = serde_json::from_str::<LightningInvoiceForAddressRequest>(
+			r#"{"amount_sat": 1000, "address": "ark1"}"#,
+		).unwrap();
+		assert!(!request.ark_address_hint);
+
+		let request = serde_json::from_str::<LightningInvoiceForAddressRequest>(
+			r#"{"amount_sat": 1000, "address": "ark1", "ark_address_hint": true}"#,
+		).unwrap();
+		assert!(request.ark_address_hint);
 	}
 }

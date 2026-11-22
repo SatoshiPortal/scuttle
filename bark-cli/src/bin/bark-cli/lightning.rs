@@ -170,6 +170,7 @@ pub async fn execute_lightning_command(
 				address: address.to_string(),
 				description,
 				expiry_secs,
+				ark_address_hint: false,
 			};
 			let resp = lightning_api::generate_invoice_for_address(config, req).await.rest()?;
 			let invoice = resp.invoice.clone();
@@ -271,6 +272,7 @@ async fn wait_for_lightning_receive(config: &Configuration, invoice: &str) -> an
 			},
 			ReceiveState::AwaitingPayment | ReceiveState::HtlcsReady
 				| ReceiveState::PreimageRevealed | ReceiveState::Delivering
+				| ReceiveState::AwaitingDelivery
 				| ReceiveState::Other => tokio::time::sleep(WAIT_POLL_INTERVAL).await,
 		}
 	}
