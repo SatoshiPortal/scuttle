@@ -141,11 +141,10 @@ id starts with `ark\x01` for the hint with the public key of the address, or
 the Ark id of the address. Lightning payers find no route through these hints
 and pay the invoice as usual.
 
-To enable it:
-
-- Set `ln_receive_ark_address_hints = true` in the captaind configuration.
-- Set `lightning_ark_address_hints = true` in the configuration of the
-  receiving wallet and of the paying wallet.
+To enable it, set `ln_receive_ark_address_hints = true` in the captaind
+configuration. Wallets use route hints by default. A wallet with
+`lightning_ark_address_hints = false` puts no Ark address in its invoices and
+pays every invoice over Lightning.
 
 The paying wallet asks the server to co-sign the arkoor with
 `RequestLightningReceiveArkoorCosign`. The server settles the Lightning receive
@@ -160,4 +159,45 @@ receives it. An output that the payer never registers and never delivers stays
 with the payer, and an expiry payout pays it to the payer.
 
 The server reports the receive as settled when it co-signs the arkoor. A client
-must treat the invoice as paid only when the wallet holds the VTXOs.
+must treat the invoice as paid only when the wallet holds the VTXOs, or when
+the server reports the arkoor delivered, see below.
+
+## Forwarded invoices
+
+A wallet can make an invoice that forwards its payment to another Ark address,
+with `Bolt11InvoiceBuilder::claim_destination`. In barkd this is
+`POST /api/v1/lightning/receives/invoice/for-address`. By default the invoice
+carries no Ark address.
+
+With `Bolt11InvoiceBuilder::destination_hint`, or `ark_address_hint: true` in
+the REST request, the invoice carries the destination address in its route
+hints. The wallet sends it as `hint_address` in `StartLightningReceive`. The
+server checks that it is a public key address of the server with a single
+mailbox delivery. The claim key and the mailbox of the receive stay those of
+the forwarding wallet, for a payment over Lightning.
+
+An arkoor that pays the invoice must pay the key of the destination address.
+In expiry payout mode it must bind the output to the mailbox of that address,
+which the server unblinds with its mailbox key. The arkoor never reaches the
+forwarding wallet.
+
+## Delivery of an arkoor payment
+
+In expiry payout mode, the server records the outputs that pay the Ark address
+of the invoice when it co-signs the arkoor. It marks an output delivered when
+it has both the registered signed VTXO and the identical VTXO posted to the
+mailbox of that address. At that time the VTXO must be unspent and unexpired,
+with no exit and no expiry payout. A delivered output stays delivered when its
+owner spends it later.
+
+`CheckLightningReceive` reports `delivered` for a receive that an arkoor
+settled: `true` once all its recorded outputs are delivered, else `false`. The
+field is unset when the server is not in expiry payout mode, and for a receive
+that no arkoor settled.
+
+A forwarded receive paid by arkoor is in the state `AwaitingDelivery` while the
+server reports `delivered = false`. The REST state is `awaiting-delivery`. The
+receive settles once the server reports `delivered = true`, or right away when
+the server does not track delivery. A forwarded receive paid over Lightning
+settles after the forwarding wallet posts the claim to the mailbox of the
+destination.
