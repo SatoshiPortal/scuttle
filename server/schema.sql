@@ -762,6 +762,19 @@ ALTER SEQUENCE public.arkoor_mailbox_id_seq OWNED BY public.arkoor_mailbox.id;
 
 
 --
+-- Name: arkoor_receive_output; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.arkoor_receive_output (
+    vtxo_id text NOT NULL,
+    subscription_id bigint NOT NULL,
+    mailbox_pk text NOT NULL,
+    delivered_height bigint,
+    CONSTRAINT arkoor_receive_output_mailbox_pk_check CHECK ((length(mailbox_pk) = 66))
+);
+
+
+--
 -- Name: board_exit; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2544,6 +2557,14 @@ ALTER TABLE ONLY public.arkoor_mailbox
 
 
 --
+-- Name: arkoor_receive_output arkoor_receive_output_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.arkoor_receive_output
+    ADD CONSTRAINT arkoor_receive_output_pkey PRIMARY KEY (vtxo_id);
+
+
+--
 -- Name: board_exit board_exit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2915,6 +2936,13 @@ CREATE INDEX arkoor_mailbox_pubkey_ix ON public.arkoor_mailbox USING btree (pubk
 --
 
 CREATE UNIQUE INDEX arkoor_mailbox_vtxo_id_uix ON public.arkoor_mailbox USING btree (vtxo_id);
+
+
+--
+-- Name: arkoor_receive_output_subscription_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX arkoor_receive_output_subscription_id_idx ON public.arkoor_receive_output USING btree (subscription_id);
 
 
 --
@@ -3392,6 +3420,22 @@ CREATE TRIGGER vtxo_update BEFORE UPDATE ON public.vtxo FOR EACH ROW EXECUTE FUN
 
 ALTER TABLE ONLY public.arkoor_mailbox
     ADD CONSTRAINT arkoor_mailbox_vtxo_id_fkey FOREIGN KEY (vtxo_id) REFERENCES public.vtxo(id);
+
+
+--
+-- Name: arkoor_receive_output arkoor_receive_output_subscription_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.arkoor_receive_output
+    ADD CONSTRAINT arkoor_receive_output_subscription_id_fkey FOREIGN KEY (subscription_id) REFERENCES public.lightning_htlc_subscription(id);
+
+
+--
+-- Name: arkoor_receive_output arkoor_receive_output_vtxo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.arkoor_receive_output
+    ADD CONSTRAINT arkoor_receive_output_vtxo_id_fkey FOREIGN KEY (vtxo_id) REFERENCES public.vtxo(vtxo_id);
 
 
 --

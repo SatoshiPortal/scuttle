@@ -1091,6 +1091,10 @@ impl Server {
 					t.execute_vtxo_tree_update(registration_update(&vtxos)).await?;
 				}
 			}
+			if self.config.expiry_payouts {
+				let ids = vtxos.iter().map(|v| v.id()).collect::<Vec<_>>();
+				t.certify_arkoor_receive_outputs(&ids).await?;
+			}
 			// An htlc-send vtxo only exists once its signed chain is
 			// registered: that is when the server holds a claim on the funds.
 			let htlc_sends = vtxos.iter().filter_map(|v| match v.policy() {

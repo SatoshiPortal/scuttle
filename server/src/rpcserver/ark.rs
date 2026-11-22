@@ -670,7 +670,11 @@ impl rpc::server::ArkService for Server {
 		let payment_hash = PaymentHash::from_bytes(req.hash)?;
 
 		let sub = self.check_lightning_receive(payment_hash, req.wait).await.to_status()?;
-		Ok(tonic::Response::new(sub.into()))
+		let delivered = self.lightning_receive_delivered(&sub).await.to_status()?;
+		Ok(tonic::Response::new(protos::CheckLightningReceiveResponse {
+			delivered,
+			..sub.into()
+		}))
 	}
 
 	#[tracing::instrument(skip(self, req))]

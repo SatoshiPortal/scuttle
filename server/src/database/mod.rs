@@ -517,7 +517,8 @@ impl<'t> Tx<'t> {
 			return Ok(None);
 		}
 
-		self.check_owner_mailbox(mailbox_id, &vtxos.iter().map(|vtxo| vtxo.id()).collect::<Vec<_>>()).await?;
+		let ids = vtxos.iter().map(|vtxo| vtxo.id()).collect::<Vec<_>>();
+		self.check_owner_mailbox(mailbox_id, &ids).await?;
 
 		// Acquire advisory lock to serialize all mailbox writes.
 		// This prevents race conditions where checkpoints could be committed out of order.
@@ -545,6 +546,12 @@ impl<'t> Tx<'t> {
 				&checkpoint,
 				&mailbox_type_str,
 			]).await?;
+		}
+
+		// A post that is sent again can still complete a delivery, for
+		// example after the registration of the VTXOs.
+		if self.expiry_payouts() && mailbox_type == MailboxType::ArkoorReceive {
+			self.certify_arkoor_receive_outputs(&ids).await?;
 		}
 
 		if total_inserted == 0 {

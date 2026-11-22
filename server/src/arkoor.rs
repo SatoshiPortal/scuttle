@@ -13,10 +13,10 @@ use ark::arkoor::package::{
 
 use crate::database::SpendState;
 use crate::database::htlc_vtxo::{self, HtlcResolution};
-use crate::database::ln::LightningHtlcSubscription;
 use crate::database::tree::VtxoTreeUpdate;
 use crate::owner_mailbox::DestinationBindings;
 use crate::error::ContextExt;
+use crate::ln::ArkoorReceive;
 use crate::{check_max_amount, Server};
 
 pub(crate) struct ArkoorCosignRequestValidationParams {
@@ -132,7 +132,7 @@ impl Server {
 		&self,
 		builder: ArkoorPackageBuilder<ServerCanCosign>,
 		destinations: &DestinationBindings,
-		paid_receive: Option<&LightningHtlcSubscription>,
+		paid_receive: Option<&ArkoorReceive<'_>>,
 	) -> anyhow::Result<(ArkoorPackageBuilder<ServerSigned>, u64)> {
 		let vtxo_guard = self.vtxos_in_flux.try_lock(builder.input_ids()).map_err(|e| {
 			slog!(ArkoorInputAlreadyInFlux, vtxo: e.id);
@@ -163,6 +163,16 @@ impl Server {
 		let source_ids = builder.input_ids().collect::<Vec<_>>();
 		let new_lightning_send = builder.build_unsigned_vtxos()
 			.any(|v| v.policy().as_server_htlc_send().is_some());
+		// In payout mode the server tracks the delivery of the outputs that
+		// pay the receive, see Tx::certify_arkoor_receive_outputs.
+		let receive_outputs = paid_receive.filter(|_| self.config.expiry_payouts).map(|receive| {
+			let policy = VtxoPolicy::new_pubkey(receive.destination.pubkey);
+			let ids = builder.build_unsigned_vtxos()
+				.filter(|v| *v.policy() == policy)
+				.map(|v| v.id())
+				.collect::<Vec<_>>();
+			(receive, ids)
+		});
 		let inserted = self.db.write(async |t| {
 			if self.config.expiry_payouts {
 				t.single_owner_mailbox(&source_ids).await?;
@@ -178,9 +188,12 @@ impl Server {
 				// The arkoor settles the receive it pays, together with its
 				// own spend. This runs before the spend is stored, which
 				// tells a new arkoor from one co-signed before.
-				t.settle_lightning_receive_by_arkoor(receive.id, &source_ids).await?;
+				t.settle_lightning_receive_by_arkoor(receive.sub.id, &source_ids).await?;
 			}
 			let inserted = t.execute_vtxo_tree_update(update).await?;
+			if let Some((receive, ids)) = receive_outputs.as_ref() {
+				t.record_arkoor_receive_outputs(receive.sub.id, receive.destination.mailbox, ids).await?;
+			}
 			htlc_vtxo::set_htlc_vtxo_resolutions(
 				&t, &claimed_htlc_recvs, HtlcResolution::Fulfilled,
 			).await?;
@@ -198,7 +211,7 @@ impl Server {
 		&self,
 		request: ArkoorPackageCosignRequest<VtxoId>,
 		destinations: &DestinationBindings,
-		paid_receive: Option<&LightningHtlcSubscription>,
+		paid_receive: Option<&ArkoorReceive<'_>>,
 	) -> anyhow::Result<ArkoorPackageCosignResponse> {
 		let input_vtxo_ids = request.inputs().cloned().collect::<Vec<VtxoId>>();
 		let input_vtxo_states = self.db.read(async |t| t.get_user_vtxos_by_id(&input_vtxo_ids).await).await?;

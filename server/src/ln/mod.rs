@@ -70,6 +70,14 @@ pub struct ArkoorReceiveDestination {
 	pub mailbox: MailboxIdentifier,
 }
 
+/// A lightning receive that a new arkoor settles, and where the arkoor
+/// pays it.
+#[derive(Debug, Clone, Copy)]
+pub struct ArkoorReceive<'a> {
+	pub sub: &'a LightningHtlcSubscription,
+	pub destination: ArkoorReceiveDestination,
+}
+
 /// Validate the client-requested HTLC-recv VTXO expiry leaves at
 /// least `htlc_expiry_delta` blocks of settlement margin below the
 /// inbound Lightning HTLC expiry, both for the request and the
@@ -964,11 +972,11 @@ impl Server {
 			}
 			None
 		} else {
-			Some(&sub)
+			Some(ArkoorReceive { sub: &sub, destination })
 		};
 
 		// The co-sign of a new arkoor settles the receive, or it fails.
-		let response = self.cosign_oor(request, destinations, paid_receive).await?;
+		let response = self.cosign_oor(request, destinations, paid_receive.as_ref()).await?;
 
 		// The server can stop after the co-sign and before this step, so a
 		// retry also notifies the receiver and cancels the hold invoice.
@@ -976,6 +984,20 @@ impl Server {
 		self.lightning_manager.finish_intra_ark_payment(sub).await;
 
 		Ok(response)
+	}
+
+	/// Whether the arkoor that settled the receive `sub` reached the mailbox
+	/// of the Ark address in its invoice. `None` when the server does not
+	/// track it: outside expiry payout mode, and for a receive that no
+	/// arkoor settled.
+	pub async fn lightning_receive_delivered(
+		&self,
+		sub: &LightningHtlcSubscription,
+	) -> anyhow::Result<Option<bool>> {
+		if !self.config.expiry_payouts || sub.status != LightningHtlcSubscriptionStatus::Settled {
+			return Ok(None);
+		}
+		self.db.read(async |t| t.arkoor_receive_delivered(sub.id).await).await
 	}
 
 	/// Polls until the HTLC subscription for `payment_hash` reaches a
