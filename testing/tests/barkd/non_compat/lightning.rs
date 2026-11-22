@@ -1,5 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bitcoin::Amount;
 use bitcoin::secp256k1::Keypair;
@@ -27,6 +28,8 @@ use ark_testing::util::{poll_interval, FutureExt};
 /// `expiry_payouts`, a barkd that forwards Lightning receives, a payer with
 /// a board of 400,000 sats, and an owner that receives the forwarded
 /// payments and reads its mailbox only when the test asks.
+///
+/// barkd syncs every five seconds, as a forwarding service configures it.
 async fn forward_setup(
 	ctx: &TestContext, expiry_payouts: bool,
 ) -> (LightningPaymentSetup, Arc<Captaind>, Barkd, bark::Wallet, bark::Wallet) {
@@ -38,7 +41,9 @@ async fn forward_setup(
 		})
 		.create().await;
 	srv.wait_for_vtxopool(ctx).await;
-	let forwarder = ctx.barkd("forwarder", &srv).create().await;
+	let forwarder = ctx.barkd("forwarder", &srv)
+		.cfg(|cfg| cfg.daemon_sync_interval_secs = 5)
+		.create().await;
 	let payer = ctx.bark_sdk("payer", &srv).boarded(sat(400_000)).create().await;
 	let owner = ctx.bark_sdk("owner", &srv).cfg(|cfg| cfg.daemon_manual_sync = true).create().await;
 	lightning.sync().await;
@@ -164,7 +169,8 @@ async fn forwarded_invoice_with_destination_hint() {
 /// bound to its mailbox. The receive of barkd waits in AwaitingDelivery
 /// while the payer stops after the co-sign, and while the arkoor is posted
 /// to another mailbox. It settles once the payer registers the arkoor and
-/// posts it to the mailbox of the destination.
+/// posts it to the mailbox of the destination, within about one sync
+/// interval of barkd.
 #[tokio::test]
 async fn forwarded_arkoor_receive_settles_once_delivered() {
 	let ctx = TestContext::new("barkd/forwarded_arkoor_receive_settles_once_delivered").await;
@@ -220,7 +226,13 @@ async fn forwarded_arkoor_receive_settles_once_delivered() {
 		blinded_id: blinded_id(&destination), vtxos: paid,
 	}).await.unwrap();
 	assert_eq!(server_receive(&srv, hash).await, (LightningReceiveStatus::Settled, Some(true)));
+	// The sync of barkd drives the receive, so it settles within about one
+	// sync interval.
+	let delivered = Instant::now();
 	wait_receive_state(&forwarder, hash, LightningReceiveStateKind::Settled).await;
+	let latency = delivered.elapsed();
+	println!("barkd settled the receive {latency:?} after the server reported it delivered");
+	assert!(latency < Duration::from_secs(15), "barkd took {latency:?}");
 	owner.sync().await;
 	assert_eq!(owner.balance().await.unwrap().spendable, amount);
 
