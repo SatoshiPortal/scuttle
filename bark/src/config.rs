@@ -261,10 +261,10 @@ pub struct Config {
 	///
 	/// The server and the receiving wallet settle an invoice paid this way
 	/// like one paid over Lightning, but the payer gets no preimage as
-	/// proof of payment.
+	/// proof of payment. Turn it off to pay every invoice over Lightning.
 	///
-	/// Default value: false
-	#[serde(default)]
+	/// Default value: true
+	#[serde(default = "default_lightning_ark_address_hints")]
 	pub lightning_ark_address_hints: bool,
 
 	/// Open the wallet only with an Ark server in expiry payout mode.
@@ -272,6 +272,10 @@ pub struct Config {
 	/// Default value: false
 	#[serde(default)]
 	pub require_expiry_payouts: bool,
+}
+
+fn default_lightning_ark_address_hints() -> bool {
+	true
 }
 
 impl Config {
@@ -305,7 +309,7 @@ impl Config {
 			daemon_manual_sync: false,
 			change_vtxo_split_factor: 2,
 			vtxo_key_gap_limit: DEFAULT_VTXO_KEY_GAP_LIMIT,
-			lightning_ark_address_hints: false,
+			lightning_ark_address_hints: default_lightning_ark_address_hints(),
 			require_expiry_payouts: false,
 		};
 
@@ -395,6 +399,31 @@ mod test {
 		let config = Config::load(Network::Regtest, &path).expect("an old config should load");
 		assert_eq!(config.vtxo_key_gap_limit, DEFAULT_VTXO_KEY_GAP_LIMIT,
 			"a missing gap limit should fall back to the default");
+
+		std::fs::remove_dir_all(&dir).ok();
+	}
+
+	/// A config file from before Ark address hints were on by default has no
+	/// value for them, so the wallet uses them.
+	#[test]
+	fn config_file_without_ark_address_hints_uses_them() {
+		let dir = std::env::temp_dir().join(format!("bark-cfg-hints-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("config.toml");
+		std::fs::write(&path, "\
+			server_address = \"http://127.0.0.1:3535\"\n\
+			esplora_address = \"http://127.0.0.1:3002\"\n\
+		").unwrap();
+		let config = Config::load(Network::Regtest, &path).expect("an old config should load");
+		assert!(config.lightning_ark_address_hints);
+
+		std::fs::write(&path, "\
+			server_address = \"http://127.0.0.1:3535\"\n\
+			esplora_address = \"http://127.0.0.1:3002\"\n\
+			lightning_ark_address_hints = false\n\
+		").unwrap();
+		let config = Config::load(Network::Regtest, &path).expect("the config should load");
+		assert!(!config.lightning_ark_address_hints, "the setting can be turned off");
 
 		std::fs::remove_dir_all(&dir).ok();
 	}
