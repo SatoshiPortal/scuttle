@@ -4088,3 +4088,62 @@ async fn late_xpay_result_does_not_finalize_a_retry() {
 		tokio::time::sleep(poll_interval()).await;
 	}
 }
+
+/// Start a receive that the server must refuse, and return why.
+async fn refused_receive(rpc: &mut ArkClient, request: protos::StartLightningReceiveRequest) -> String {
+	let error = rpc.start_lightning_receive(request).await.unwrap_err();
+	assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+	error.message().to_owned()
+}
+
+/// The server puts a hint address in an invoice only when it allows route
+/// hints, the receive has a claim key, and the address is a public key
+/// address of this server with a single mailbox. A receive that is started
+/// again must ask for the same hint address.
+#[tokio::test]
+async fn start_lightning_receive_checks_the_hint_address() {
+	let ctx = TestContext::new("server/start_lightning_receive_checks_the_hint_address").await;
+	let lightning = ctx.new_lightning_setup_no_channel("lightningd").await;
+	let srv = ctx.captaind("server").lightningd(&lightning.internal)
+		.cfg(|cfg| cfg.ln_receive_ark_address_hints = true).create().await;
+	let owner = ctx.bark_sdk("owner", &srv).create().await;
+	let address = owner.new_address().await.unwrap();
+	let server_pubkey = srv.ark_info().await.server_pubkey;
+	let claim_key = Keypair::new(&SECP, &mut bip39::rand::thread_rng());
+	let hash = ark::lightning::Preimage::random().compute_payment_hash();
+	let start = |hint: &ark::Address, claim: bool| protos::StartLightningReceiveRequest {
+		payment_hash: hash.to_vec(),
+		amount_sat: 100_000,
+		min_cltv_delta: 6,
+		mailbox_id: None,
+		description: None,
+		expiry_secs: None,
+		claim_pubkey: claim.then(|| claim_key.public_key().serialize().to_vec()),
+		ark_address_hint: false,
+		hint_address: Some(hint.to_string()),
+	};
+	let mut rpc = srv.get_public_rpc().await;
+
+	let error = refused_receive(&mut rpc, start(&address, false)).await;
+	assert!(error.contains("claim key"), "{error}");
+	let other_server = Keypair::new(&SECP, &mut bip39::rand::thread_rng()).public_key();
+	let elsewhere = ark::Address::new(true, other_server, address.policy().clone(), address.delivery().to_vec());
+	let error = refused_receive(&mut rpc, start(&elsewhere, true)).await;
+	assert!(error.contains("another Ark server"), "{error}");
+	let no_mailbox = ark::Address::new(true, server_pubkey, address.policy().clone(), vec![]);
+	let error = refused_receive(&mut rpc, start(&no_mailbox, true)).await;
+	assert!(error.contains("single mailbox"), "{error}");
+
+	let bolt11 = rpc.start_lightning_receive(start(&address, true)).await.unwrap().into_inner().bolt11;
+	let invoice = Bolt11Invoice::from_str(&bolt11).unwrap();
+	assert_eq!(ark::lightning::Bolt11InvoiceExt::ark_address(&invoice), Some(address.clone()));
+	let again = rpc.start_lightning_receive(start(&address, true)).await.unwrap().into_inner().bolt11;
+	assert_eq!(again, bolt11);
+	let error = refused_receive(&mut rpc, start(&owner.new_address().await.unwrap(), true)).await;
+	assert!(error.contains("different hint address"), "{error}");
+
+	// A server that does not allow route hints refuses a hint address.
+	let plain = ctx.captaind("plain").create().await;
+	let error = refused_receive(&mut plain.get_public_rpc().await, start(&address, true)).await;
+	assert!(error.contains("disabled"), "{error}");
+}
