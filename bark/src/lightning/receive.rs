@@ -307,6 +307,11 @@ impl Wallet {
 		if let Some(cp) = self.lightning_receive_checkpoint(hash).await? {
 			return Ok(LightningReceiveState::InProgress(cp));
 		}
+		// The receive can settle between the two reads. It writes its settled
+		// record before it removes its checkpoint, so read the record again.
+		if let Some(settled) = self.inner.db.get_settled_lightning_receive(hash).await? {
+			return Ok(LightningReceiveState::Settled(settled));
+		}
 		bail!("no pending lightning receive found for this payment hash");
 	}
 
