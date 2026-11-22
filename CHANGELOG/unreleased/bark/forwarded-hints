@@ -1,0 +1,13 @@
+- Use Ark address hints by default
+  `Config::lightning_ark_address_hints` is now true by default. The wallet
+  pays an invoice that carries an Ark address of its own Ark server with an
+  arkoor, and asks for its Ark address in its invoices when the server allows
+  it. Set it to false to pay every invoice over Lightning.
+- Put the destination of a forwarded invoice in its route hints
+  `Bolt11InvoiceBuilder::destination_hint` puts the claim destination in the
+  route hints of the invoice, so a wallet on the same Ark server can pay the
+  destination directly. A receive paid this way waits until the server reports
+  the arkoor delivered to the destination, or settles right away when the
+  server does not track delivery.
+  - **BREAKING:** `Progress` of a Lightning receive has the variant
+    `AwaitingDelivery`. An older wallet cannot read a receive in that state.

@@ -1,0 +1,5 @@
+- Put the destination of a forwarded invoice in its route hints
+  `POST /api/v1/lightning/receives/invoice/for-address` takes
+  `ark_address_hint`. When it is true, the invoice carries the Ark address, and
+  a wallet on the same Ark server can pay it with an arkoor straight to that
+  address.

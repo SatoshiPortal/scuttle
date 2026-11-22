@@ -1,0 +1,13 @@
+- Put the destination of a forwarded receive in its invoice
+  `StartLightningReceive` takes `hint_address`, the Ark address to put in the
+  route hints of the invoice instead of the address of the claim key. A wallet
+  that forwards a receive can then let users of the server pay the destination
+  directly. An arkoor that pays the invoice must pay that address, and in
+  expiry payout mode bind the output to its mailbox.
+- Report the delivery of an invoice paid by arkoor in expiry payout mode
+  A receive paid by arkoor settles when the server co-signs the arkoor, before
+  the payer registers it and posts it to the receiver. The server now records
+  the outputs at co-sign and marks each one delivered once it is registered
+  and posted to the mailbox of the address in the invoice.
+  `CheckLightningReceive` reports it in `delivered`. The migration adds the
+  table `arkoor_receive_output`.
