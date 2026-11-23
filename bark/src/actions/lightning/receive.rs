@@ -841,8 +841,8 @@ async fn claim_lightning_receive_htlcs(
 	if wallet.expiry_payouts().await {
 		// The server can settle the payment before its reply arrives, so in
 		// payout mode the disclosure is stored before the request leaves: a
-		// payout of the HTLC-recv VTXOs ends the receive only from
-		// PreimageRevealed, never by failing it.
+		// payout of the HTLC-recv VTXOs ends a local receive only from
+		// PreimageRevealed. A forwarded receive still needs delivery.
 		let checkpoint = LightningReceive {
 			progress: Progress::PreimageRevealed(htlcs.clone()),
 			..recv.clone()

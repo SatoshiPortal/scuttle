@@ -16,3 +16,6 @@
   An arkoor can pay an invoice with an Ark address without the wallet, so
   `Wallet::cancel_lightning_receive` drops a receive only when the server
   cancels it or still reports it unpaid. A cancel without the server fails.
+- Keep a forwarded Lightning receive pending if its HTLC grants expire
+  The payout of those grants goes to the forwarding wallet. The forwarded
+  receive settles when its claim outputs reach the destination.
