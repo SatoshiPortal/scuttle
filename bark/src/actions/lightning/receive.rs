@@ -362,6 +362,11 @@ pub enum LightningReceiveState {
 	Settled(SettledLightningReceive),
 }
 
+/// This wallet has neither a settled receipt nor a pending receive for the hash.
+#[derive(Debug, thiserror::Error)]
+#[error("no pending lightning receive found for this payment hash")]
+pub struct LightningReceiveNotFound;
+
 /// Outcome of polling the server for an inbound payment while in
 /// [`Progress::AwaitingPayment`].
 pub(crate) enum IncomingStatus {

@@ -14,7 +14,7 @@ use ark::vtxo::Full;
 use crate::Wallet;
 use crate::actions::{DriveMode, WalletAction};
 use crate::actions::lightning::receive::{
-	Htlcs, LightningReceive, LightningReceiveState, Progress,
+	Htlcs, LightningReceive, LightningReceiveNotFound, LightningReceiveState, Progress,
 	ln_recv_action_id, start_lightning_receive
 };
 use crate::movement::{MovementDestination, MovementStatus};
@@ -277,8 +277,9 @@ impl Wallet {
 	pub async fn lightning_receive_checkpoint(&self, hash: PaymentHash)
 		-> anyhow::Result<Option<LightningReceive>>
 	{
-		Ok(self.inner.db.get_wallet_action_checkpoint(&ln_recv_action_id(hash)).await?
-			.and_then(|cp| cp.into_lightning_receive()))
+		self.inner.db.get_wallet_action_checkpoint(&ln_recv_action_id(hash)).await?
+			.map(|cp| cp.into_lightning_receive().context("invalid checkpoint for Lightning receive"))
+			.transpose()
 	}
 
 	/// Look up the preimage for a receive by payment hash, for witnessing
@@ -312,7 +313,7 @@ impl Wallet {
 		if let Some(settled) = self.inner.db.get_settled_lightning_receive(hash).await? {
 			return Ok(LightningReceiveState::Settled(settled));
 		}
-		bail!("no pending lightning receive found for this payment hash");
+		Err(LightningReceiveNotFound.into())
 	}
 
 	/// Create, store and return a [`Bolt11Invoice`] for an incoming
