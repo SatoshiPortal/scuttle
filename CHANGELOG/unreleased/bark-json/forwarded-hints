@@ -1,0 +1,5 @@
+- Add `ark_address_hint` to `LightningInvoiceForAddressRequest` and the receive state `awaiting-delivery`
+  `ark_address_hint` is false by default. A forwarded receive paid by arkoor is
+  `awaiting-delivery` until the Ark server reports the arkoor delivered. An
+  older client reads the state as `other`.
+  - **BREAKING:** `LightningReceiveStateKind` has the variant `AwaitingDelivery`.

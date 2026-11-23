@@ -14,7 +14,7 @@ use ark::vtxo::Full;
 use crate::Wallet;
 use crate::actions::{DriveMode, WalletAction};
 use crate::actions::lightning::receive::{
-	Htlcs, LightningReceive, LightningReceiveState, Progress,
+	Htlcs, LightningReceive, LightningReceiveNotFound, LightningReceiveState, Progress,
 	ln_recv_action_id, start_lightning_receive
 };
 use crate::movement::{MovementDestination, MovementStatus};
@@ -34,6 +34,7 @@ pub struct Bolt11InvoiceBuilder<'a> {
 	expiry: Option<Duration>,
 	token: Option<String>,
 	claim_destination: Option<ark::Address>,
+	destination_hint: bool,
 }
 
 impl<'a> Bolt11InvoiceBuilder<'a> {
@@ -45,6 +46,7 @@ impl<'a> Bolt11InvoiceBuilder<'a> {
 			expiry: None,
 			token: None,
 			claim_destination: None,
+			destination_hint: false,
 		}
 	}
 
@@ -107,6 +109,22 @@ impl<'a> Bolt11InvoiceBuilder<'a> {
 		self
 	}
 
+	/// Put the Ark address of the claim destination in the route hints of
+	/// the invoice. A wallet on the same Ark server can then pay the
+	/// destination with an arkoor instead of over Lightning, and the
+	/// payment never goes through this wallet. Requires a claim destination
+	/// and a server that allows route hints.
+	///
+	/// The receive of an invoice paid this way settles once the server
+	/// reports the arkoor delivered to the mailbox of the destination, or
+	/// right away if the server does not track delivery. A receive without
+	/// a claim destination follows [crate::Config::lightning_ark_address_hints]
+	/// instead.
+	pub fn destination_hint(mut self, destination_hint: bool) -> Self {
+		self.destination_hint = destination_hint;
+		self
+	}
+
 	/// Mint the invoice and persist an `AwaitingPayment` checkpoint for it.
 	///
 	/// This does not wait for payment. The background sync (or an explicit
@@ -116,7 +134,7 @@ impl<'a> Bolt11InvoiceBuilder<'a> {
 		let amount = self.amount.context("an invoice amount is required")?;
 		let start = start_lightning_receive(
 			self.wallet, amount, self.description, self.expiry, self.token,
-			self.claim_destination,
+			self.claim_destination, self.destination_hint,
 		).await?;
 		let invoice = start.invoice.clone();
 		let mut checkpoint = self.wallet.try_lock_action::<LightningReceive>(&start.id()).await?
@@ -195,6 +213,10 @@ impl Wallet {
 			if recv.progress != Progress::AwaitingPayment || recv.invoice.ark_address().is_none() {
 				continue;
 			}
+			// The arkoor of a forwarded receive pays its destination.
+			if recv.claim_destination.is_some() {
+				continue;
+			}
 
 			let claim_pubkey = self.peek_keypair(recv.key_index).await?.public_key();
 			let (paid, other) = rest.into_iter()
@@ -255,8 +277,9 @@ impl Wallet {
 	pub async fn lightning_receive_checkpoint(&self, hash: PaymentHash)
 		-> anyhow::Result<Option<LightningReceive>>
 	{
-		Ok(self.inner.db.get_wallet_action_checkpoint(&ln_recv_action_id(hash)).await?
-			.and_then(|cp| cp.into_lightning_receive()))
+		self.inner.db.get_wallet_action_checkpoint(&ln_recv_action_id(hash)).await?
+			.map(|cp| cp.into_lightning_receive().context("invalid checkpoint for Lightning receive"))
+			.transpose()
 	}
 
 	/// Look up the preimage for a receive by payment hash, for witnessing
@@ -285,7 +308,12 @@ impl Wallet {
 		if let Some(cp) = self.lightning_receive_checkpoint(hash).await? {
 			return Ok(LightningReceiveState::InProgress(cp));
 		}
-		bail!("no pending lightning receive found for this payment hash");
+		// The receive can settle between the two reads. It writes its settled
+		// record before it removes its checkpoint, so read the record again.
+		if let Some(settled) = self.inner.db.get_settled_lightning_receive(hash).await? {
+			return Ok(LightningReceiveState::Settled(settled));
+		}
+		Err(LightningReceiveNotFound.into())
 	}
 
 	/// Create, store and return a [`Bolt11Invoice`] for an incoming
@@ -370,13 +398,30 @@ impl Wallet {
 
 		match recv.progress {
 			Progress::AwaitingPayment => {
-				// Best-effort server cancel: an abandoned hold invoice just
-				// expires server-side, so don't fail the local cancel on error.
-				if let Ok((mut srv, _)) = self.require_server().await {
-					if let Err(e) = srv.client.cancel_lightning_receive(
-						protos::CancelLightningReceiveRequest { payment_hash: hash.to_vec() },
-					).await {
-						warn!("server did not cancel lightning receive {}: {}", hash, e);
+				// An abandoned hold invoice just expires server-side, so a
+				// server that does not cancel it is no reason to keep the
+				// receive. A payment can still arrive without this wallet, an
+				// arkoor on the Ark address of the invoice for example, so drop
+				// the receive only once the server cancelled it or still
+				// reports it unpaid. Else the payment could no longer be
+				// followed.
+				let (mut srv, _) = self.require_server().await
+					.context("cannot cancel: the Ark server is unreachable")?;
+				if let Err(e) = srv.client.cancel_lightning_receive(
+					protos::CancelLightningReceiveRequest { payment_hash: hash.to_vec() },
+				).await {
+					warn!("server did not cancel lightning receive {}: {}", hash, e);
+					let status = srv.client.check_lightning_receive(protos::CheckLightningReceiveRequest {
+						hash: hash.to_vec(),
+						wait: false,
+					}).await.context("cannot cancel: failed to read the receive from the Ark server")?
+						.into_inner().status;
+					if status != protos::LightningReceiveStatus::Created as i32 {
+						let status = protos::LightningReceiveStatus::try_from(status)
+							.map(|s| s.as_str_name()).unwrap_or("UNKNOWN");
+						bail!("cannot cancel: the Ark server did not cancel the receive and reports it {}",
+							status,
+						);
 					}
 				}
 				checkpoint.finish(self).await
@@ -387,6 +432,9 @@ impl Wallet {
 			},
 			Progress::PreimageRevealed(_) | Progress::Delivering(_) => {
 				bail!("cannot cancel: preimage has already been revealed");
+			},
+			Progress::AwaitingDelivery => {
+				bail!("cannot cancel: the invoice was paid by arkoor");
 			},
 		}
 	}

@@ -344,7 +344,7 @@ async fn expiry_payout_decided_grant_claim_stores_no_preimage() {
 		payment_hash: hash.to_vec(), amount_sat: 100_000,
 		min_cltv_delta: srv.config().max_user_invoice_cltv_delta.into(),
 		mailbox_id: Some(mailbox.serialize()), description: None, expiry_secs: None,
-		claim_pubkey: Some(receiver.public_key().serialize().to_vec()), ark_address_hint: false,
+		claim_pubkey: Some(receiver.public_key().serialize().to_vec()), ark_address_hint: false, hint_address: None,
 	}).await.unwrap().into_inner().bolt11;
 	let payer = lightning.external;
 	let payment = tokio::spawn(async move { payer.try_pay_bolt11(invoice).await });
@@ -538,7 +538,7 @@ async fn expiry_payout_failed_intra_ark_payment_takes_no_grants() {
 		payment_hash: hash.to_vec(), amount_sat: 90_000, min_cltv_delta: 58,
 		mailbox_id: Some(MailboxIdentifier::from_pubkey(receiver.public_key()).serialize()),
 		description: None, expiry_secs: None,
-		claim_pubkey: Some(receiver.public_key().serialize().to_vec()), ark_address_hint: false,
+		claim_pubkey: Some(receiver.public_key().serialize().to_vec()), ark_address_hint: false, hint_address: None,
 	}).await.unwrap().into_inner().bolt11;
 	lightning.sync().await;
 	let payment = tokio::spawn({
@@ -599,7 +599,7 @@ async fn expiry_payout_sweeps_root_of_a_cancelled_receive() {
 		payment_hash: hash.to_vec(), amount_sat: 100_000,
 		min_cltv_delta: srv.config().max_user_invoice_cltv_delta.into(),
 		mailbox_id: Some(mailbox.serialize()), description: None, expiry_secs: None,
-		claim_pubkey: Some(receiver.public_key().serialize().to_vec()), ark_address_hint: false,
+		claim_pubkey: Some(receiver.public_key().serialize().to_vec()), ark_address_hint: false, hint_address: None,
 	}).await.unwrap().into_inner().bolt11;
 	let pay = tokio::spawn({
 		let (payer, invoice) = (payer.clone(), invoice.clone());
@@ -692,7 +692,7 @@ async fn expiry_payout_pays_unclaimed_forward_to_provider() {
 		min_cltv_delta: srv.config().max_user_invoice_cltv_delta.into(),
 		mailbox_id: Some(MailboxIdentifier::from_pubkey(provider.public_key()).serialize()),
 		description: None, expiry_secs: None,
-		claim_pubkey: Some(grant_key.public_key().serialize().to_vec()), ark_address_hint: false,
+		claim_pubkey: Some(grant_key.public_key().serialize().to_vec()), ark_address_hint: false, hint_address: None,
 	}).await.unwrap().into_inner().bolt11;
 	let pay = tokio::spawn({
 		let payer = payer.clone();

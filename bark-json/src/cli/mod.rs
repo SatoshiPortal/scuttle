@@ -611,6 +611,10 @@ pub enum LightningReceiveStateKind {
 	PreimageRevealed,
 	/// The claimed VTXOs are being delivered
 	Delivering,
+	/// An arkoor paid the invoice on the Ark address of its destination,
+	/// and the Ark server has not reported it delivered to the destination
+	/// yet
+	AwaitingDelivery,
 	/// The receive settled
 	Settled,
 	/// A state added after this client was built
@@ -775,6 +779,7 @@ impl From<&LightningReceive> for LightningReceiveInfo {
 			},
 			// The HTLCs are spent once the claim outputs await delivery.
 			ReceiveProgress::Delivering(_) => (LightningReceiveStateKind::Delivering, vec![]),
+			ReceiveProgress::AwaitingDelivery => (LightningReceiveStateKind::AwaitingDelivery, vec![]),
 		};
 		LightningReceiveInfo {
 			payment_hash: recv.payment_hash,
@@ -837,6 +842,7 @@ mod test {
 			("htlcs-ready", LightningReceiveStateKind::HtlcsReady),
 			("preimage-revealed", LightningReceiveStateKind::PreimageRevealed),
 			("delivering", LightningReceiveStateKind::Delivering),
+			("awaiting-delivery", LightningReceiveStateKind::AwaitingDelivery),
 			("settled", LightningReceiveStateKind::Settled),
 		];
 		for (name, state) in states {

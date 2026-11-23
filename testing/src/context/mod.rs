@@ -673,7 +673,8 @@ impl TestContext {
 			daemon_manual_sync: false,
 			change_vtxo_split_factor: 2,
 			vtxo_key_gap_limit: bark::DEFAULT_VTXO_KEY_GAP_LIMIT,
-			lightning_ark_address_hints: false,
+			// The default of the wallet.
+			lightning_ark_address_hints: true,
 		}
 	}
 

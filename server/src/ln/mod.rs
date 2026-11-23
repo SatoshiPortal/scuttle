@@ -61,6 +61,23 @@ use crate::{check_max_amount, telemetry, Server, CAPTAIND_API_KEY};
 /// tree, so its expiry must stay close to the one the server asks for.
 const PAYOUT_HTLC_EXPIRY_SLACK: BlockDelta = BlockDelta::new(6);
 
+/// The key and the unblinded mailbox of the Ark address in the route hints
+/// of an invoice. An arkoor that pays the invoice pays this key, and in
+/// payout mode binds the output to this mailbox.
+#[derive(Debug, Clone, Copy)]
+pub struct ArkoorReceiveDestination {
+	pub pubkey: PublicKey,
+	pub mailbox: MailboxIdentifier,
+}
+
+/// A lightning receive that a new arkoor settles, and where the arkoor
+/// pays it.
+#[derive(Debug, Clone, Copy)]
+pub struct ArkoorReceive<'a> {
+	pub sub: &'a LightningHtlcSubscription,
+	pub destination: ArkoorReceiveDestination,
+}
+
 /// Validate the client-requested HTLC-recv VTXO expiry leaves at
 /// least `htlc_expiry_delta` blocks of settlement margin below the
 /// inbound Lightning HTLC expiry, both for the request and the
@@ -691,6 +708,7 @@ impl Server {
 		expiry: Option<Duration>,
 		claim_pubkey: Option<PublicKey>,
 		ark_address_hint: bool,
+		hint_address: Option<ark::Address>,
 	) -> anyhow::Result<protos::StartLightningReceiveResponse> {
 		info!("Starting bolt11 board with payment_hash: {}", payment_hash.as_hex());
 
@@ -755,6 +773,15 @@ impl Server {
 		if self.config.expiry_payouts && (claim_pubkey.is_none() || mailbox_id.is_none()) {
 			return badarg!("receive requires claim key and mailbox");
 		}
+		if let Some(address) = hint_address.as_ref() {
+			if !self.config.ln_receive_ark_address_hints {
+				return badarg!("Ark address hints are disabled on this server");
+			}
+			if claim_pubkey.is_none() {
+				return badarg!("a receive with a hint address requires a claim key");
+			}
+			self.arkoor_receive_destination(address)?;
+		}
 
 		// A payment hash carries at most one subscription.
 		let subscription = self.db.read(async |t|
@@ -785,6 +812,13 @@ impl Server {
 							);
 						}
 					}
+					if let Some(requested) = hint_address.as_ref() {
+						if subscription.invoice.ark_address().as_ref() != Some(requested) {
+							return badarg!("an invoice for payment hash {} already exists \
+								with a different hint address", payment_hash,
+							);
+						}
+					}
 					trace!("Found existing created subscription, returning invoice: {}",
 						subscription.invoice.to_string(),
 					);
@@ -808,8 +842,10 @@ impl Server {
 		// between last lightning htlc and htlc-recv vtxo one
 		let ln_cltv_delta = min_cltv_delta + self.config.htlc_expiry_delta;
 
-		let route_hints = match (claim_pubkey, mailbox_id) {
-			(Some(claim_pubkey), Some(mailbox_id))
+		let route_hints = match (hint_address.as_ref(), claim_pubkey, mailbox_id) {
+			(Some(address), _, _) => ark_address_route_hints(address)
+				.badarg("hint address cannot be put in route hints")?.to_vec(),
+			(None, Some(claim_pubkey), Some(mailbox_id))
 				if ark_address_hint && self.config.ln_receive_ark_address_hints
 			=> self.ark_address_route_hints(claim_pubkey, mailbox_id)?.to_vec(),
 			_ => vec![],
@@ -850,6 +886,30 @@ impl Server {
 		ark_address_route_hints(&address).context("address has no route hints")
 	}
 
+	/// The key and the unblinded mailbox of an Ark address that an invoice
+	/// carries in its route hints. Only a public key address of this server
+	/// with a single mailbox delivery qualifies.
+	fn arkoor_receive_destination(
+		&self,
+		address: &ark::Address,
+	) -> anyhow::Result<ArkoorReceiveDestination> {
+		if address.is_testnet() != (self.config.network != bitcoin::Network::Bitcoin) {
+			return badarg!("Ark address is for another network");
+		}
+		if !address.ark_id().is_for_server(self.server_pubkey) {
+			return badarg!("Ark address is for another Ark server");
+		}
+		let VtxoPolicy::Pubkey(policy) = address.policy() else {
+			return badarg!("Ark address does not have a public key policy");
+		};
+		let [VtxoDelivery::ServerMailbox { blinded_id }] = address.delivery() else {
+			return badarg!("Ark address must have a single mailbox delivery");
+		};
+		let mailbox = self.unblind_mailbox_id(*blinded_id, policy.user_pubkey)
+			.badarg("Ark address has an invalid mailbox")?;
+		Ok(ArkoorReceiveDestination { pubkey: policy.user_pubkey, mailbox })
+	}
+
 	/// Co-sign an arkoor that pays the invoice of a lightning receive on the
 	/// Ark address in its route hints, which settles the receive.
 	///
@@ -874,16 +934,18 @@ impl Server {
 
 		let sub = self.db.read(async |t| t.get_htlc_subscription_by_payment_hash(payment_hash).await).await?
 			.not_found([payment_hash], "no pending payment with this payment hash")?;
-		// A receive can have a claim key without route hints.
-		let claim_pubkey = sub.claim_pubkey.filter(|_| sub.invoice.ark_address().is_some())
-			.badarg("invoice has no Ark address")?;
+		// The arkoor pays the Ark address in the route hints of the invoice.
+		// That is the address of the claim key and mailbox of the receive, or
+		// the hint address of a receive that forwards its payment.
+		let address = sub.invoice.ark_address().badarg("invoice has no Ark address")?;
+		let destination = self.arkoor_receive_destination(&address)?;
 		let retry = match sub.status {
 			LightningHtlcSubscriptionStatus::Created if !sub.invoice.is_expired() => false,
 			LightningHtlcSubscriptionStatus::Settled => true,
 			_ => return badarg!("invoice is not payable"),
 		};
 
-		let policy = VtxoPolicy::new_pubkey(claim_pubkey);
+		let policy = VtxoPolicy::new_pubkey(destination.pubkey);
 		let paid = request.all_outputs()
 			.filter(|o| o.policy == policy)
 			.map(|o| o.total_amount)
@@ -894,11 +956,8 @@ impl Server {
 
 		if self.config.expiry_payouts {
 			// The payer could bind the VTXO to another mailbox than the
-			// one the receive was started for.
-			let mailbox_id = self.db.read(async |t|
-				t.get_lightning_receiver_mailbox_id(payment_hash).await
-			).await?;
-			if destinations.mailbox_for(claim_pubkey) != mailbox_id.map(|m| m.as_pubkey()) {
+			// mailbox of the address in the invoice.
+			if destinations.mailbox_for(destination.pubkey) != Some(destination.mailbox.as_pubkey()) {
 				return badarg!("arkoor doesn't pay the mailbox of the invoice");
 			}
 		}
@@ -913,11 +972,11 @@ impl Server {
 			}
 			None
 		} else {
-			Some(&sub)
+			Some(ArkoorReceive { sub: &sub, destination })
 		};
 
 		// The co-sign of a new arkoor settles the receive, or it fails.
-		let response = self.cosign_oor(request, destinations, paid_receive).await?;
+		let response = self.cosign_oor(request, destinations, paid_receive.as_ref()).await?;
 
 		// The server can stop after the co-sign and before this step, so a
 		// retry also notifies the receiver and cancels the hold invoice.
@@ -925,6 +984,20 @@ impl Server {
 		self.lightning_manager.finish_intra_ark_payment(sub).await;
 
 		Ok(response)
+	}
+
+	/// Whether the arkoor that settled the receive `sub` reached the mailbox
+	/// of the Ark address in its invoice. `None` when the server does not
+	/// track it: outside expiry payout mode, and for a receive that no
+	/// arkoor settled.
+	pub async fn lightning_receive_delivered(
+		&self,
+		sub: &LightningHtlcSubscription,
+	) -> anyhow::Result<Option<bool>> {
+		if !self.config.expiry_payouts || sub.status != LightningHtlcSubscriptionStatus::Settled {
+			return Ok(None);
+		}
+		self.db.read(async |t| t.arkoor_receive_delivered(sub.id).await).await
 	}
 
 	/// Polls until the HTLC subscription for `payment_hash` reaches a

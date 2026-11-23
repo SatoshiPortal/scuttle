@@ -1,0 +1,5 @@
+- Add `hint_address` to `StartLightningReceiveRequest` and `delivered` to `CheckLightningReceiveResponse`
+  A forwarded receive can put its destination in the route hints of its
+  invoice, and a client can see when an arkoor that paid an invoice reached
+  the mailbox of its receiver. A server or a client that does not know the
+  fields ignores them.

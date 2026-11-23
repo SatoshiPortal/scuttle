@@ -1,0 +1,21 @@
+- Use Ark address hints by default
+  `Config::lightning_ark_address_hints` is now true by default. The wallet
+  pays an invoice that carries an Ark address of its own Ark server with an
+  arkoor, and asks for its Ark address in its invoices when the server allows
+  it. Set it to false to pay every invoice over Lightning.
+- Put the destination of a forwarded invoice in its route hints
+  `Bolt11InvoiceBuilder::destination_hint` puts the claim destination in the
+  route hints of the invoice, so a wallet on the same Ark server can pay the
+  destination directly. A receive paid this way waits until the server reports
+  the arkoor delivered to the destination, or settles right away when the
+  server does not track delivery. A forwarded receive refuses an invoice with
+  any other Ark address.
+  - **BREAKING:** `Progress` of a Lightning receive has the variant
+    `AwaitingDelivery`. An older wallet cannot read a receive in that state.
+- Keep a Lightning receive on cancel unless the server reports it unpaid
+  An arkoor can pay an invoice with an Ark address without the wallet, so
+  `Wallet::cancel_lightning_receive` drops a receive only when the server
+  cancels it or still reports it unpaid. A cancel without the server fails.
+- Keep a forwarded Lightning receive pending if its HTLC grants expire
+  The payout of those grants goes to the forwarding wallet. The forwarded
+  receive settles when its claim outputs reach the destination.

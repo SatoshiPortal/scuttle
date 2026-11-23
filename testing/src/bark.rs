@@ -335,6 +335,7 @@ impl Bark {
 				receive::Progress::HtlcsReady(_) => "HtlcsReady",
 				receive::Progress::PreimageRevealed(_) => "PreimageRevealed",
 				receive::Progress::Delivering(_) => "Delivering",
+				receive::Progress::AwaitingDelivery => "AwaitingDelivery",
 			}),
 			Cp::Recovery(r) => format!("recovery.{}", match r.progress {
 				recovery::Progress::Xpub { .. } => "Xpub",

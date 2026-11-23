@@ -11,6 +11,7 @@ use utoipa::OpenApi;
 
 use ark::lightning::Offer;
 use bark::LightningSendOptions;
+use bark::actions::lightning::receive::LightningReceiveNotFound;
 use bark::lightning_invoice::Bolt11Invoice;
 use bark::lnurllib::lightning_address::LightningAddress;
 use bark::lnurllib::lnurl::LnUrl;
@@ -100,7 +101,9 @@ pub async fn generate_invoice(
 	description = "Generates a new BOLT11 invoice. When paid, the wallet claims the Lightning \
 		receive and forwards the resulting Ark VTXO to the supplied Ark address mailbox. \
 		The invoice expires after `expiry_secs` if given, otherwise after the Ark server's \
-		invoice expiry, which is also the longest it accepts.",
+		invoice expiry, which is also the longest it accepts. With `ark_address_hint`, the \
+		invoice also carries the Ark address, and a wallet on the same Ark server can pay \
+		it with an arkoor straight to that address.",
 	tag = "lightning"
 )]
 #[debug_handler]
@@ -118,6 +121,7 @@ pub async fn generate_invoice_for_address(
 	let invoice = wallet.bolt11_invoice_builder()
 		.amount(amount)
 		.claim_destination(address)
+		.destination_hint(body.ark_address_hint)
 		.description(body.description)
 		.expiry(body.expiry_secs.map(Duration::from_secs))
 		.build().await
@@ -164,8 +168,10 @@ pub async fn get_receive_status(
 		badarg!("identifier is not a valid payment hash, invoice or preimage");
 	};
 
-	let state = wallet.lightning_receive_state(payment_hash).await
-		.not_found([payment_hash], "Lightning receive not found")?;
+	let state = match wallet.lightning_receive_state(payment_hash).await {
+		Err(e) if e.is::<LightningReceiveNotFound>() => Err(e).not_found([payment_hash], "Lightning receive not found"),
+		result => result,
+	}?;
 	Ok(axum::Json(bark_json::cli::LightningReceiveInfo::from_state(&state)))
 }
 

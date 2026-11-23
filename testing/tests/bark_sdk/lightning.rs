@@ -501,7 +501,7 @@ async fn pay_with_retry_for() {
 }
 
 /// A server that lets users put their Ark address in invoices, and two
-/// wallets on it that use it.
+/// wallets on it that use it, as wallets do by default.
 async fn ark_address_hint_setup(
 	ctx: &TestContext, expiry_payouts: bool,
 ) -> (LightningPaymentSetup, Arc<Captaind>, bark::Wallet, bark::Wallet) {
@@ -513,12 +513,9 @@ async fn ark_address_hint_setup(
 		})
 		.create().await;
 	srv.wait_for_vtxopool(ctx).await;
-	let payer = ctx.bark_sdk("payer", &srv).boarded(sat(400_000))
-		.cfg(|cfg| cfg.lightning_ark_address_hints = true)
-		.create().await;
-	let receiver = ctx.bark_sdk("receiver", &srv)
-		.cfg(|cfg| cfg.lightning_ark_address_hints = true)
-		.create().await;
+	let payer = ctx.bark_sdk("payer", &srv).boarded(sat(400_000)).create().await;
+	let receiver = ctx.bark_sdk("receiver", &srv).create().await;
+	assert!(payer.config().lightning_ark_address_hints && receiver.config().lightning_ark_address_hints);
 	lightning.sync().await;
 	(lightning, srv, payer, receiver)
 }
@@ -604,15 +601,16 @@ async fn external_payer_pays_invoice_with_ark_address() {
 	assert!(matches!(claimed.unwrap(), LightningReceiveState::Settled(_)));
 }
 
-/// A wallet that doesn't pay Ark addresses pays the invoice over
-/// lightning, and the wallet that didn't ask for an Ark address gets an
-/// invoice without one.
+/// A wallet that turns Ark address hints off pays the invoice over
+/// lightning, as upstream does, and gets invoices without an Ark address.
 #[tokio::test]
-async fn ark_address_hints_are_opt_in() {
-	let ctx = TestContext::new("bark_sdk/ark_address_hints_are_opt_in").await;
+async fn ark_address_hints_can_be_turned_off() {
+	let ctx = TestContext::new("bark_sdk/ark_address_hints_can_be_turned_off").await;
 	let (_lightning, srv, _payer, receiver) = ark_address_hint_setup(&ctx, false).await;
 
-	let other = ctx.bark_sdk("other", &srv).boarded(sat(400_000)).create().await;
+	let other = ctx.bark_sdk("other", &srv).boarded(sat(400_000))
+		.cfg(|cfg| cfg.lightning_ark_address_hints = false)
+		.create().await;
 	let invoice = other.bolt11_invoice(sat(10_000), None, None).await.unwrap();
 	assert_eq!(invoice.ark_address(), None);
 
@@ -653,10 +651,7 @@ async fn ark_address_payment_binds_the_receivers_mailbox() {
 /// test asks it to, so it claims no receive by itself.
 async fn manual_hint_receiver(ctx: &TestContext, srv: &Captaind) -> bark::Wallet {
 	ctx.bark_sdk("manual_receiver", srv)
-		.cfg(|cfg| {
-			cfg.lightning_ark_address_hints = true;
-			cfg.daemon_manual_sync = true;
-		})
+		.cfg(|cfg| cfg.daemon_manual_sync = true)
 		.create().await
 }
 
@@ -840,6 +835,86 @@ async fn ark_address_receive_is_credited_only_for_its_amount() {
 		other => panic!("receive not settled: {:?}", other),
 	}
 	assert_eq!(assert_balance_consistent(&receiver, false).await.spendable, amount + sat(1_000));
+}
+
+/// A receive that an arkoor settled is not cancelled: the server refuses the
+/// cancel, and the wallet keeps the receive to credit the arkoor once it
+/// arrives. An unpaid receive is still cancelled although the server does
+/// not cancel its hold invoice.
+#[tokio::test]
+async fn ark_address_receive_paid_by_arkoor_is_not_cancelled() {
+	let ctx = TestContext::new("bark_sdk/ark_address_receive_paid_by_arkoor_is_not_cancelled").await;
+	let (_lightning, srv, payer, _) = ark_address_hint_setup(&ctx, false).await;
+	let receiver = manual_hint_receiver(&ctx, &srv).await;
+	let amount = sat(100_000);
+
+	let unpaid = receiver.bolt11_invoice(amount, None, None).await.unwrap();
+	receiver.cancel_lightning_receive(PaymentHash::from(&unpaid)).await.unwrap();
+	receiver.lightning_receive_state(PaymentHash::from(&unpaid)).await
+		.expect_err("the unpaid receive is cancelled");
+
+	let invoice = receiver.bolt11_invoice(amount, None, None).await.unwrap();
+	let hash = PaymentHash::from(&invoice);
+	let address = invoice.ark_address().unwrap();
+	let (arkoor, key) = arkoor_to_invoice_address(&payer, &invoice).await;
+	let response = srv.get_public_rpc().await
+		.request_lightning_receive_arkoor_cosign(invoice_arkoor(hash, &arkoor)).await.unwrap().into_inner();
+	let error = receiver.cancel_lightning_receive(hash).await.expect_err("an arkoor settled the receive");
+	assert!(format!("{error:#}").contains("SETTLED"), "{error:#}");
+	assert!(matches!(receiver.lightning_receive_state(hash).await.unwrap(), LightningReceiveState::InProgress(_)));
+
+	let vtxos = arkoor.user_cosign(&[key], ArkoorPackageCosignResponse::try_from(response).unwrap()).unwrap()
+		.build_signed_vtxos();
+	payer.register_vtxo_transactions_with_server(&vtxos).await.unwrap();
+	let Some(VtxoDelivery::ServerMailbox { blinded_id }) = address.delivery().first() else {
+		panic!("the Ark address of the invoice has no mailbox");
+	};
+	srv.get_mailbox_public_rpc().await.post_arkoor_message(protos::mailbox_server::PostArkoorMessageRequest {
+		blinded_id: blinded_id.as_ref().to_vec(),
+		vtxos: vtxos.iter().filter(|v| v.policy() == address.policy()).map(|v| v.serialize()).collect(),
+	}).await.unwrap();
+	receiver.sync().await;
+	match receiver.lightning_receive_state(hash).await.unwrap() {
+		LightningReceiveState::Settled(settled) => assert_eq!(settled.amount, amount),
+		other => panic!("receive not settled: {:?}", other),
+	}
+}
+
+/// Asks the server for the Ark address of the claim key in every invoice,
+/// as a server that ignores the request of the wallet would.
+#[derive(Clone)]
+struct ForceOwnAddressHint;
+
+#[async_trait::async_trait]
+impl captaind::proxy::ArkRpcProxy for ForceOwnAddressHint {
+	async fn start_lightning_receive(
+		&self, upstream: &mut ArkClient, mut req: protos::StartLightningReceiveRequest,
+	) -> Result<protos::StartLightningReceiveResponse, tonic::Status> {
+		req.ark_address_hint = true;
+		req.hint_address = None;
+		Ok(upstream.start_lightning_receive(req).await?.into_inner())
+	}
+}
+
+/// A forwarded receive takes no Ark address in its invoice but the address
+/// of its destination. The address of its own claim key would let an arkoor
+/// pay the forwarding wallet instead of the destination.
+#[tokio::test]
+async fn forwarded_receive_refuses_an_ark_address_it_did_not_ask_for() {
+	let ctx = TestContext::new("bark_sdk/forwarded_receive_refuses_an_ark_address_it_did_not_ask_for").await;
+	let (_lightning, srv, _payer, receiver) = ark_address_hint_setup(&ctx, false).await;
+	let proxy = srv.start_proxy_no_mailbox(ForceOwnAddressHint).await;
+	let forwarder = ctx.bark_sdk("forwarder", &proxy).create().await;
+	let destination = receiver.new_address().await.unwrap();
+
+	let error = forwarder.bolt11_invoice_builder().amount(sat(50_000)).claim_destination(destination)
+		.build().await.expect_err("the invoice carries the address of the claim key");
+	assert!(format!("{error:#}").contains("did not ask for"), "{error:#}");
+	assert!(forwarder.pending_lightning_receives().await.unwrap().is_empty());
+
+	// A receive without a destination still gets its own address.
+	let invoice = forwarder.bolt11_invoice(sat(50_000), None, None).await.unwrap();
+	assert!(invoice.ark_address().is_some());
 }
 
 /// Holds the reply to the first receive claim forever, after the server

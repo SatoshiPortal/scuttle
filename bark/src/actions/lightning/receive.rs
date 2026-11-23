@@ -133,7 +133,17 @@ impl WalletAction for LightningReceive {
 					IncomingStatus::Ready => {
 						Progress::HtlcsReady(prepare_lightning_receive_htlcs(wallet, &self).await?)
 					},
-					IncomingStatus::PaidByArkoor => {
+					IncomingStatus::PaidByArkoor { delivered } if self.claim_destination.is_some() => {
+						// The arkoor paid the destination directly, see
+						// finish_forwarded_arkoor_receive.
+						if delivered == Some(false) {
+							Progress::AwaitingDelivery
+						} else {
+							finish_forwarded_arkoor_receive(wallet, &self).await?;
+							return Ok(Advance::Done);
+						}
+					},
+					IncomingStatus::PaidByArkoor { .. } => {
 						// The arkoor is credited as this receive when it
 						// arrives in our mailbox, see
 						// Wallet::credit_lightning_receives_paid_by_arkoor.
@@ -143,6 +153,24 @@ impl WalletAction for LightningReceive {
 							return Ok(Advance::Done);
 						}
 						return Ok(Advance::Park { state: self, wake_after: None, error: None });
+					},
+				}
+			},
+			Progress::AwaitingDelivery => {
+				match check_incoming_lightning_payment(wallet, &self).await? {
+					IncomingStatus::PaidByArkoor { delivered: Some(false) } => {
+						return Ok(Advance::Park {
+							state: self,
+							wake_after: Some(AWAITING_PAYMENT_POLL_INTERVAL),
+							error: None,
+						});
+					},
+					IncomingStatus::PaidByArkoor { .. } => {
+						finish_forwarded_arkoor_receive(wallet, &self).await?;
+						return Ok(Advance::Done);
+					},
+					IncomingStatus::Pending | IncomingStatus::Ready | IncomingStatus::Canceled => {
+						abort!("Ark server no longer reports receive {} paid by arkoor", self.payment_hash);
 					},
 				}
 			},
@@ -204,6 +232,7 @@ impl WalletAction for LightningReceive {
 		match &self.progress {
 			Progress::PreimageRevealed(htlcs) => htlcs.vtxo_ids.clone(),
 			Progress::AwaitingPayment
+				| Progress::AwaitingDelivery
 				| Progress::HtlcsReady(_)
 				| Progress::Delivering(_)
 			=> Vec::new(),
@@ -220,6 +249,8 @@ impl WalletAction for LightningReceive {
 			// No money committed; just back off. Expiry reaping happens in
 			// the step.
 			Progress::AwaitingPayment => Advance::Retry { state: self, error },
+			// The payment went to the destination; only our record is left.
+			Progress::AwaitingDelivery => Advance::Retry { state: self, error },
 			Progress::HtlcsReady(htlcs) => {
 				if or_retry!(self, is_htlc_claim_window_closed(wallet, htlcs).await) {
 					or_retry!(self, abandon_lightning_receive(wallet, &self, htlcs).await);
@@ -266,7 +297,8 @@ impl WalletAction for LightningReceive {
 				or_retry!(self, abandon_lightning_receive(wallet, &self, htlcs).await);
 				Advance::Failed(error)
 			},
-			Progress::PreimageRevealed(_) | Progress::Delivering(_) => {
+			// The server settled the receive, so keep it rather than drop it.
+			Progress::AwaitingDelivery | Progress::PreimageRevealed(_) | Progress::Delivering(_) => {
 				Advance::Park { state: self, wake_after: None, error: Some(error) }
 			},
 		}
@@ -293,6 +325,12 @@ pub enum Progress {
 	/// to be forwarded to the claim destination's mailbox. Only entered
 	/// when the receive has a claim destination that isn't our own.
 	Delivering(Delivery),
+	/// An arkoor paid the claim destination on its Ark address in the
+	/// invoice, and the server settled the receive. The payer still has to
+	/// deliver the arkoor to the mailbox of the destination, and the server
+	/// has not reported it delivered yet. Only entered when the receive has
+	/// a claim destination.
+	AwaitingDelivery,
 }
 
 /// A handle for the HTLC-recv vtxos the server granted us
@@ -324,6 +362,11 @@ pub enum LightningReceiveState {
 	Settled(SettledLightningReceive),
 }
 
+/// This wallet has neither a settled receipt nor a pending receive for the hash.
+#[derive(Debug, thiserror::Error)]
+#[error("no pending lightning receive found for this payment hash")]
+pub struct LightningReceiveNotFound;
+
 /// Outcome of polling the server for an inbound payment while in
 /// [`Progress::AwaitingPayment`].
 pub(crate) enum IncomingStatus {
@@ -334,7 +377,11 @@ pub(crate) enum IncomingStatus {
 	/// The server canceled the hold invoice; nothing to claim.
 	Canceled,
 	/// An arkoor to the Ark address in the route hints of the invoice paid it.
-	PaidByArkoor,
+	PaidByArkoor {
+		/// Whether the arkoor reached the mailbox of that address. `None`
+		/// when the server does not track it.
+		delivered: Option<bool>,
+	},
 }
 
 /// Mint a bolt11 invoice and build a fresh [`LightningReceive`] in
@@ -347,6 +394,7 @@ pub(crate) async fn start_lightning_receive(
 	expiry: Option<Duration>,
 	token: Option<String>,
 	claim_destination: Option<ark::Address>,
+	destination_hint: bool,
 ) -> anyhow::Result<LightningReceive> {
 	if amount == Amount::ZERO {
 		bail!("Cannot create invoice for 0 sats (this would create an explicit 0 sat invoice, not an any-amount invoice)");
@@ -356,6 +404,12 @@ pub(crate) async fn start_lightning_receive(
 		wallet.validate_arkoor_address(destination).await
 			.context("invalid arkoor address")?;
 	}
+	// The Ark address a user of the server can pay the invoice on instead.
+	let hint_address = match (destination_hint, claim_destination.as_ref()) {
+		(true, Some(destination)) => Some(destination.clone()),
+		(true, None) => bail!("an Ark address hint for a destination requires a claim destination"),
+		(false, _) => None,
+	};
 
 	let (mut srv, ark_info) = wallet.require_server().await?;
 	let config = wallet.config();
@@ -400,9 +454,12 @@ pub(crate) async fn start_lightning_receive(
 		description,
 		expiry_secs: expiry.map(|e| e.as_secs()),
 		claim_pubkey: Some(claim_keypair.public_key().serialize().to_vec()),
-		// A forwarded receive must be claimed over lightning to reach its
-		// destination.
+		// The address of our claim key would give the payment of a
+		// forwarded receive to us, so a forwarded receive only puts the
+		// address of its destination in the invoice. A server that does not
+		// know hint_address then puts no address in it.
 		ark_address_hint: config.lightning_ark_address_hints && claim_destination.is_none(),
+		hint_address: hint_address.as_ref().map(|a| a.to_string()),
 	};
 
 	let resp = srv.client.start_lightning_receive(req).await?.into_inner();
@@ -422,8 +479,20 @@ pub(crate) async fn start_lightning_receive(
 	}
 
 	// Other users of the server pay the Ark address in the invoice instead
-	// of the invoice, so it must be ours.
-	if let Some(address) = invoice.ark_address() {
+	// of the invoice, so it must be ours, or the destination we asked for.
+	// A forwarded receive takes no other address.
+	if let Some(hint) = hint_address.as_ref() {
+		if invoice.ark_address().as_ref() != Some(hint) {
+			bail!("Ark server returned an invoice without the Ark address of the destination, \
+				it may not support hint addresses",
+			);
+		}
+	} else if let Some(address) = invoice.ark_address() {
+		if claim_destination.is_some() {
+			bail!("Ark server returned a forwarded invoice with an Ark address we did not ask for: {}",
+				address,
+			);
+		}
 		if address != wallet.peek_address(key_index).await? {
 			bail!("Ark server returned an invoice with an Ark address that is not ours: {}", address);
 		}
@@ -493,8 +562,11 @@ async fn check_incoming_lightning_payment(
 		protos::LightningReceiveStatus::HtlcsReady => IncomingStatus::Ready,
 		protos::LightningReceiveStatus::Created => IncomingStatus::Pending,
 		protos::LightningReceiveStatus::Canceled => IncomingStatus::Canceled,
-		protos::LightningReceiveStatus::Settled if recv.invoice.ark_address().is_some() => {
-			IncomingStatus::PaidByArkoor
+		// An arkoor pays a forwarded receive only on its destination.
+		protos::LightningReceiveStatus::Settled if recv.invoice.ark_address().is_some()
+			&& recv.claim_destination.iter().all(|d| recv.invoice.ark_address().as_ref() == Some(d))
+		=> {
+			IncomingStatus::PaidByArkoor { delivered: sub.delivered }
 		},
 		// We never claimed, yet the server has the preimage. Polling
 		// won't change that, so fail the receive and surface it.
@@ -774,8 +846,8 @@ async fn claim_lightning_receive_htlcs(
 	if wallet.expiry_payouts().await {
 		// The server can settle the payment before its reply arrives, so in
 		// payout mode the disclosure is stored before the request leaves: a
-		// payout of the HTLC-recv VTXOs ends the receive only from
-		// PreimageRevealed, never by failing it.
+		// payout of the HTLC-recv VTXOs ends a local receive only from
+		// PreimageRevealed. A forwarded receive still needs delivery.
 		let checkpoint = LightningReceive {
 			progress: Progress::PreimageRevealed(htlcs.clone()),
 			..recv.clone()
@@ -903,6 +975,54 @@ async fn deliver_vtxos_to_address(
 		DeliveryOutcome::AnySucceeded => Ok(()),
 		DeliveryOutcome::AllFailed { summary } => bail!(summary),
 	}
+}
+
+/// AwaitingPayment or AwaitingDelivery -> done, for a forwarded receive
+/// that an arkoor paid on the Ark address of its destination in the
+/// invoice. The arkoor pays the destination directly and never reaches this
+/// wallet, so only the permanent settled record and a movement that shows
+/// the payment forwarded are left to write.
+///
+/// The server reports the arkoor delivered to the mailbox of the
+/// destination first, unless it does not track delivery.
+async fn finish_forwarded_arkoor_receive(
+	wallet: &Wallet,
+	recv: &LightningReceive,
+) -> Result<(), AdvanceError> {
+	let destination = recv.claim_destination.as_ref()
+		.context("forwarded receive has no claim destination")
+		.abort()?;
+	let amount = recv.invoice.get_payment_amount(None)
+		.context("ln receive invoice should have amount").abort()?;
+	let intended = amount.to_signed().context("invoice amount out of range").abort()?;
+
+	// Settled record first, then the movement: see claim_lightning_receive_htlcs.
+	// The movement is keyed by the action, so a re-drive finds it again.
+	let movement_id = wallet.inner.movements.get_or_create_movement_with_action(
+		Subsystem::LIGHTNING_RECEIVE,
+		LightningReceiveMovement::Receive.to_string(),
+		&recv.id(),
+		MovementUpdate::new()
+			.intended_balance(intended)
+			.effective_balance(SignedAmount::ZERO)
+			.metadata(LightningMovement::metadata(
+				recv.payment_hash, Vec::<VtxoId>::new(), Some(recv.payment_preimage),
+			))
+			.received_on([MovementDestination::new(recv.invoice.clone().into(), amount)]),
+	).await.context("failed to create lightning receive movement").retry()?;
+	wallet.inner.db.record_settled_lightning_receive(
+		recv.payment_hash, recv.payment_preimage, &recv.invoice, amount,
+	).await.retry()?;
+	wallet.inner.movements.finish_movement_with_update(
+		movement_id,
+		MovementStatus::Successful,
+		MovementUpdate::new()
+			.effective_balance(SignedAmount::ZERO)
+			.sent_to([MovementDestination::ark(destination.clone(), amount)]),
+	).await.context("failed to finish lightning receive movement").retry()?;
+
+	info!("Invoice {} paid by arkoor to its destination {}", recv.payment_hash, destination);
+	Ok(())
 }
 
 /// HtlcsReady abandon: the preimage was never revealed, so we simply drop
