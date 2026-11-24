@@ -627,7 +627,7 @@ async fn expiry_payout_sweeps_root_of_a_cancelled_receive() {
 	{
 		let mut cfg = srv.config_mut();
 		cfg.vtxopool.vtxo_targets.clear();
-		let node = &mut cfg.cln_array[0];
+		let node = cfg.cln.as_mut().expect("test server has a CLN node");
 		node.uri = grpc.uri.parse().unwrap();
 		node.hold_invoice.as_mut().unwrap().uri = plugin.uri.parse().unwrap();
 	}

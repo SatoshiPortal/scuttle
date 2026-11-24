@@ -1,0 +1,32 @@
+- captaind supports a single CLN node
+  If captaind manages multiple nodes, finish pending outgoing payments and
+  settle or cancel outstanding hold invoices on each node you plan to retire.
+  captaind tracks those payments and invoices by the node that created them.
+
+  Save the old config and environment settings before upgrading. captaind
+  refuses to start with `[[cln_array]]`. Migrate the node you want to keep.
+  - Rename `[[cln_array]]` to `[cln]`.
+  - Remove the `priority` field.
+  - Replace the JSON env var `BARK_SERVER__CLN_ARRAY` with one env var per
+    field, for example `BARK_SERVER__CLN__URI` and
+    `BARK_SERVER__CLN__HOLD_INVOICE__URI`.
+
+  If you roll back to Scuttle RC8, restore the old settings with the binary.
+  RC8 accepts a config with only `[cln]` and starts without a Lightning node.
+  After restarting captaind, verify that the configured node is online.
+
+  ```toml
+  [cln]
+  uri = "https://cln:9736"
+  server_cert_path = "/data/cln/regtest/ca.pem"
+  client_cert_path = "/data/cln/regtest/client.pem"
+  client_key_path = "/data/cln/regtest/client-key.pem"
+  hold_invoice.uri = "https://cln:9988"
+  hold_invoice.server_cert_path = "/data/cln/regtest/hold/ca.pem"
+  hold_invoice.client_cert_path = "/data/cln/regtest/hold/client.pem"
+  hold_invoice.client_key_path = "/data/cln/regtest/hold/client-key.pem"
+  ```
+  [#2857](https://gitlab.com/ark-bitcoin/bark/-/merge_requests/2857)
+  - **BREAKING:** The `[[cln_array]]` config section is replaced by `[cln]`.
+  - **BREAKING:** The admin RPCs `StartLightningNode` and
+    `StopLightningNode` are removed.

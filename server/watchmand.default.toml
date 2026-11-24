@@ -1,6 +1,7 @@
 #
 # This is a template config file for watchmand.
-# Select a sweep destination before starting watchmand.
+# Before starting watchmand, choose an operator sweep destination below and
+# set cookie or both rpc_user and rpc_pass in the [bitcoind] section.
 #
 
 # The directory all watchmand data is stored
@@ -9,8 +10,9 @@ data_dir = "./bark-server-watchmand"
 # The bitcoin network this server runs on
 network = "regtest"
 
-# Set exactly one operator sweep destination. Export a dedicated public receive
-# descriptor from your wallet to rotate sweep addresses.
+# Set exactly one operator sweep destination for the configured network.
+# A fixed address receives every operator sweep. To rotate addresses, use
+# a dedicated public receive descriptor from your wallet.
 #sweep_descriptor = "tr(<account-tpub>/0/*)"
 #sweep_address = "<regtest address>"
 
@@ -23,13 +25,17 @@ htlc_settlement_poll_interval = "60s"
 # Minimum number of confirmations for a UTXO to be considered trusted
 min_trusted_confs = 1
 
+# Endpoint for OpenTelemetry collector
+#otel_collector_endpoint = "http://127.0.0.1:4000"
+# Probability of enabling OpenTelemetry tracing
+#otel_tracing_sampler = "0.5"
 # The name of your deployment used by OpenTelemetry
 otel_deployment_name = "my_regtest"
 
 # Optional listen address for the private admin gRPC API.
 # Unauthenticated by design and as privileged as shell access to this host.
 # Keep it on loopback.
-#admin_address = "127.0.0.1:4536"
+#admin_address = "127.0.0.1:3538"
 
 ###############
 # BLOCKLIST   #

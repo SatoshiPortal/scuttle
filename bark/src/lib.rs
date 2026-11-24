@@ -82,8 +82,10 @@
 //!
 //! 	// Create a sqlite database
 //! 	let datadir = PathBuf::from("./bark");
+//! 	tokio::fs::create_dir_all(&datadir).await.unwrap();
 //!
-//! 	// Generate and seed and store it somewhere
+//! 	// Generate a mnemonic and store it somewhere. To open the wallet
+//! 	// again, read it back as in the next example.
 //! 	let mnemonic = bip39::Mnemonic::generate(12).expect("12 is valid");
 //! 	tokio::fs::write(datadir.join(MNEMONIC_FILE), mnemonic.to_string().as_bytes()).await.unwrap();
 //! 	let seed = WalletSeed::new_from_mnemonic(network, &mnemonic);
@@ -760,8 +762,10 @@ pub struct WalletProperties {
 /// Struct representing an extended private key derived from a
 /// wallet's seed, used to derive child VTXO keypairs
 ///
-/// The VTXO seed is derived by applying a hardened derivation
-/// step at index 350 from the wallet's seed.
+/// The master key is derived by applying a hardened derivation
+/// step at index 350 from the wallet's seed (`m/350'`). The VTXO
+/// seed is derived by applying a hardened derivation step at
+/// index 0 from the master key (`m/350'/0'`).
 pub struct WalletSeed {
 	master: bip32::Xpriv,
 	vtxo: bip32::Xpriv,
@@ -827,7 +831,11 @@ impl WalletSeed {
 pub struct OpenWalletArgs {
 	/// Whether to run the background daemon
 	///
-	/// When disabled, you must manually call `Wallet::sync` to sync the wallet.
+	/// The daemon syncs the wallet, refreshes VTXOs that are close to expiry,
+	/// and progresses emergency exits. When disabled, nothing does this in the
+	/// background. [Wallet::sync] alone does not refresh VTXOs: call
+	/// [Wallet::maintenance] regularly so that VTXOs do not expire, and call
+	/// [Wallet::progress_exits] while an emergency exit is in progress.
 	///
 	/// Default: true
 	pub run_daemon: bool,
@@ -873,7 +881,8 @@ pub struct OpenWalletArgs {
 
 	/// Whether to skip recovering VTXOs from the recovery mailbox.
 	///
-	/// When false (the default), recovery runs on wallet open.
+	/// When false (the default), recovery runs when the wallet is created.
+	/// Opening an existing wallet does not start a new recovery.
 	///
 	/// Default: false
 	pub skip_recovery: bool,
@@ -1064,8 +1073,10 @@ struct WalletInner {
 ///
 /// 	// Create a sqlite database
 /// 	let datadir = PathBuf::from("./bark");
+/// 	fs::create_dir_all(&datadir).await.unwrap();
 ///
-/// 	// Generate and seed and store it somewhere
+/// 	// Generate a mnemonic and store it somewhere. To open the wallet
+/// 	// again, read it back instead of generating a new one.
 /// 	let mnemonic = bip39::Mnemonic::generate(12).expect("12 is valid");
 /// 	fs::write(datadir.join(MNEMONIC_FILE), mnemonic.to_string().as_bytes()).await.unwrap();
 /// 	let seed = WalletSeed::new_from_mnemonic(network, &mnemonic);
@@ -2107,8 +2118,10 @@ impl Wallet {
 	/// Checks VTXOs that are due to be refreshed, and schedules a delegated refresh if any
 	///
 	/// This will include any VTXOs within the expiry threshold
-	/// ([Config::vtxo_refresh_expiry_threshold]) or those which
-	/// are uneconomical to exit due to onchain network conditions.
+	/// ([Config::vtxo_refresh_expiry_threshold]) or at the server's maximum
+	/// exit depth. If there is at least one of those, it also includes VTXOs
+	/// that should be refreshed soon, for example those which are
+	/// uneconomical to exit due to onchain network conditions.
 	///
 	/// Returns a [RoundStateId] if a refresh is scheduled.
 	pub async fn maybe_schedule_maintenance_refresh_delegated(
@@ -2182,8 +2195,10 @@ impl Wallet {
 	/// Performs an interactive refresh of all VTXOs that are due to be refreshed, if any
 	///
 	/// This will include any VTXOs within the expiry threshold
-	/// ([Config::vtxo_refresh_expiry_threshold]) or those which
-	/// are uneconomical to exit due to onchain network conditions.
+	/// ([Config::vtxo_refresh_expiry_threshold]) or at the server's maximum
+	/// exit depth. If there is at least one of those, it also includes VTXOs
+	/// that should be refreshed soon, for example those which are
+	/// uneconomical to exit due to onchain network conditions.
 	///
 	/// Waits for a round to start, joins it, dropping any inputs the server rejects
 	/// as unusable and retries within the same attempt, then drives that round to

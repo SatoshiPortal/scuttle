@@ -300,9 +300,8 @@ forfeit_attestation_required = false
 ln_max_fee_ppm = 900000
 max_vtxo_exit_depth = 100
 
-[[cln_array]]
+[cln]
 uri = "https://localhost:9736"
-priority = 10
 server_cert_path = "$DATA/cln-internal/signet/ca.pem"
 client_cert_path = "$DATA/cln-internal/signet/client.pem"
 client_key_path = "$DATA/cln-internal/signet/client-key.pem"
