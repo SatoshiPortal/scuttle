@@ -1,0 +1,4 @@
+- Watchmand can derive successive operator sweep addresses using a public
+  receive descriptor. Set `sweep_descriptor` to use this option, or keep the
+  existing `sweep_address` setting to receive at a fixed address.
+  [#22](https://github.com/SatoshiPortal/scuttle/pull/22)

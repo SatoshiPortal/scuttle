@@ -337,9 +337,28 @@ $(pg_section captaind "$PG_CAPTAIND_PASS" captaind)
 $btc_section
 EOF
 
-# Swept funds go back to the miner's wallet: this is a test network.
-SWEEP_ADDRESS=$(sudo grep -s '^sweep_address' "$ETC/watchmand.toml" | cut -d'"' -f2 || true)
-[ -n "$SWEEP_ADDRESS" ] || SWEEP_ADDRESS=$(as_scuttle bitcoin-cli -datadir="$DATA/bitcoind" -signet -rpcwallet=miner getnewaddress sweep)
+# Keep the configured destination. A fresh signet uses the miner's wallet.
+sweep_setting=
+if sudo test -f "$ETC/watchmand.toml"; then
+	sweep_setting=$(sudo python3 - "$ETC/watchmand.toml" <<'PY'
+import json
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as config:
+    settings = tomllib.load(config)
+keys = [key for key in ("sweep_address", "sweep_descriptor") if key in settings]
+if len(keys) > 1:
+    sys.exit("Set only one of sweep_address and sweep_descriptor in watchmand.toml")
+if keys:
+    print(f"{keys[0]} = {json.dumps(settings[keys[0]])}")
+PY
+	)
+fi
+if [ -z "$sweep_setting" ]; then
+	addr=$(as_scuttle bitcoin-cli -datadir="$DATA/bitcoind" -signet -rpcwallet=miner getnewaddress sweep)
+	sweep_setting="sweep_address = \"$addr\""
+fi
 sudo tee "$ETC/watchmand.toml" >/dev/null <<EOF
 data_dir = "$DATA/watchmand"
 network = "signet"
@@ -348,7 +367,7 @@ htlc_settlement_poll_interval = "60s"
 min_trusted_confs = 1
 otel_deployment_name = "scuttle-signet"
 admin_address = "127.0.0.1:4536"
-sweep_address = "$SWEEP_ADDRESS"
+$sweep_setting
 
 [watchman]
 reaction_interval = "10m"

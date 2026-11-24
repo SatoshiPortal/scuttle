@@ -22,14 +22,20 @@ use super::ownership::{htlc_terms, receive_timeout_allowed, LightningSourceState
 /// The largest payout transaction that is still standard.
 const MAX_PAYOUT_VSIZE: usize = 100_000;
 
-/// Every owner script must receive its exact amount once. The only optional
-/// output is the watchman's change.
+/// Every owner script must receive its exact amount once. A new transaction may
+/// pay change to the selected operator script. A stored transaction was already
+/// checked at signing and may contain an older sweep destination.
 pub(crate) fn check_owner_outputs(
-	mut owners: BTreeMap<ScriptBuf, Amount>, outputs: &[TxOut], operator_spk: &ScriptBuf,
+	mut owners: BTreeMap<ScriptBuf, Amount>, outputs: &[TxOut], operator_spk: Option<&ScriptBuf>,
 ) -> anyhow::Result<()> {
-	ensure!(!owners.contains_key(operator_spk), "operator drain aliases an owner script");
+	let change = if let Some(script) = operator_spk {
+		ensure!(!owners.contains_key(script), "operator drain aliases an owner script");
+		Some(script)
+	} else {
+		outputs.iter().find(|out| !owners.contains_key(&out.script_pubkey)).map(|out| &out.script_pubkey)
+	};
 	ensure!(outputs.len().saturating_sub(owners.len()) <= 1, "expiry payout attempt has extra outputs");
-	for out in outputs.iter().filter(|out| &out.script_pubkey != operator_spk) {
+	for out in outputs.iter().filter(|out| Some(&out.script_pubkey) != change) {
 		ensure!(owners.remove(&out.script_pubkey) == Some(out.value), "expiry payout attempt changes owner outputs");
 	}
 	ensure!(owners.is_empty(), "expiry payout attempt omits an owner output");
@@ -149,7 +155,7 @@ impl Tx<'_> {
 	/// an older one can still confirm.
 	pub async fn store_expiry_attempt(
 		&self, view: BlockRef, id: i64, payout: &Transaction,
-		fee: Amount, operator_spk: &ScriptBuf, max_fee_rate: FeeRate,
+		fee: Amount, operator_spk: Option<&ScriptBuf>, max_fee_rate: FeeRate,
 	) -> anyhow::Result<()> {
 		self.lock_watchman_tip(view).await?;
 		self.query_one("SELECT id FROM expiry_payout WHERE id=$1 FOR UPDATE", &[&id]).await?;
@@ -183,6 +189,8 @@ impl Tx<'_> {
 				"stored expiry payout attempt changed bytes or fee");
 			return Ok(());
 		}
+		// Only exact replays above can use a previously authorized sweep destination.
+		ensure!(operator_spk.is_some(), "new expiry payout attempt needs a sweep destination");
 		// Watchman inputs pay the fee, so a bad fee estimate must not drain
 		// the watchman wallet.
 		ensure!(max_fee_rate.fee_wu(payout.weight()).is_some_and(|max| fee <= max),
@@ -287,13 +295,21 @@ mod tests {
 		let bob = output(2, 3_000);
 		let change = output(3, 500);
 		let owners = BTreeMap::from([(alice.script_pubkey.clone(), alice.value), (bob.script_pubkey.clone(), bob.value)]);
-		let matches = |outputs: &[TxOut]| check_owner_outputs(owners.clone(), outputs, &change.script_pubkey).is_ok();
-		assert!(matches(&[bob.clone(), alice.clone()]));
-		assert!(matches(&[bob.clone(), change.clone(), alice.clone()]));
-		assert!(!matches(&[alice.clone(), alice.clone()]));
-		assert!(!matches(&[alice.clone(), output(2, 2_999)]));
-		assert!(!matches(&[alice.clone(), bob, change.clone(), change.clone()]));
-		assert!(!matches(&[alice]));
+		let old_change = output(4, 500);
+		let historical = [bob.clone(), old_change, alice.clone()];
+		assert!(check_owner_outputs(owners.clone(), &historical, None).is_ok());
+		assert!(check_owner_outputs(owners.clone(), &historical, Some(&change.script_pubkey)).is_err());
+		assert!(check_owner_outputs(owners.clone(), &historical, Some(&alice.script_pubkey)).is_err());
+		for drain in [None, Some(&change.script_pubkey)] {
+			let matches = |outputs: &[TxOut]| check_owner_outputs(owners.clone(), outputs, drain).is_ok();
+			assert!(matches(&[bob.clone(), alice.clone()]));
+			assert!(matches(&[bob.clone(), change.clone(), alice.clone()]));
+			assert!(!matches(&[alice.clone(), alice.clone()]));
+			assert!(!matches(&[alice.clone(), bob.clone(), alice.clone()]));
+			assert!(!matches(&[alice.clone(), output(2, 2_999)]));
+			assert!(!matches(&[alice.clone(), bob.clone(), change.clone(), change.clone()]));
+			assert!(!matches(std::slice::from_ref(&alice)));
+		}
 	}
 
 	#[test]

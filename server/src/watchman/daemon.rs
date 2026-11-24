@@ -99,6 +99,7 @@ impl Daemon {
 
 	/// Start the server.
 	pub async fn start(cfg: Config) -> anyhow::Result<Self> {
+		let destination = super::destination::SweepDestination::from_config(&cfg)?;
 		let seed = wallet::read_mnemonic_from_datadir(&cfg.data_dir)?.to_seed("");
 		let master_xpriv = bip32::Xpriv::new_master(cfg.network, &seed).unwrap();
 		let server_key_path = bip32::DerivationPath::from_str(SERVER_KEY_PATH).unwrap();
@@ -196,10 +197,6 @@ impl Daemon {
 		).await.context("Failed to start SyncManager")?;
 
 		// Start the Watchman VTXO processor
-		let drain_address = cfg.sweep_address
-			.context("sweep_address is required for watchman")?
-			.require_network(cfg.network)
-			.context("sweep_address network mismatch")?;
 		let ephemeral_master_key = {
 			let path = bip32::DerivationPath::from_str(EPHEMERAL_KEY_PATH).unwrap();
 			let xpriv = master_xpriv.derive_priv(&SECP, &path).unwrap();
@@ -227,7 +224,7 @@ impl Daemon {
 			db,
 			BlockTable::Watchmand,
 			fee_estimator,
-			drain_address,
+			destination,
 			watchman_wallet.clone(),
 			frontier,
 			sync_height_watcher,

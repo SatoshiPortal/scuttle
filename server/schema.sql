@@ -2381,6 +2381,18 @@ ALTER SEQUENCE public.wallet_changeset_id_seq OWNED BY public.wallet_changeset.i
 
 
 --
+-- Name: watchman_sweep_index; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.watchman_sweep_index (
+    id integer NOT NULL,
+    next_index bigint NOT NULL,
+    CONSTRAINT watchman_sweep_index_id_check CHECK ((id = 1)),
+    CONSTRAINT watchman_sweep_index_next_index_check CHECK (((next_index >= 0) AND (next_index <= '2147483648'::bigint)))
+);
+
+
+--
 -- Name: arkoor_mailbox id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2892,6 +2904,14 @@ ALTER TABLE ONLY public.vtxo_pool
 
 ALTER TABLE ONLY public.wallet_changeset
     ADD CONSTRAINT wallet_changeset_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: watchman_sweep_index watchman_sweep_index_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.watchman_sweep_index
+    ADD CONSTRAINT watchman_sweep_index_pkey PRIMARY KEY (id);
 
 
 --

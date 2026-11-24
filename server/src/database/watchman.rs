@@ -11,6 +11,20 @@ use tokio_stream::StreamExt;
 use crate::database::{Tx, NOARG};
 
 impl<'t> Tx<'t> {
+	pub async fn next_sweep_index(&self) -> anyhow::Result<u32> {
+		let row = self.query_one("SELECT next_index FROM watchman_sweep_index WHERE id=1", &[]).await?;
+		Ok(u32::try_from(row.get::<_, i64>(0))?)
+	}
+
+	/// Concurrent sweeps can use the same child. Keep the cursor past the highest
+	/// index used, even when an older sweep finishes last.
+	pub async fn advance_sweep_index(&self, index: u32) -> anyhow::Result<()> {
+		let changed = self.execute("UPDATE watchman_sweep_index SET next_index=GREATEST(next_index, $1::bigint+1)
+			WHERE id=1", &[&i64::from(index)]).await?;
+		ensure!(changed == 1, "missing watchman sweep index");
+		Ok(())
+	}
+
 	/// Add all vtxos whose vtxo_txid matches `funding_txid` to the frontier.
 	///
 	/// Used when a new funding tx is registered (finish_round, register_board,

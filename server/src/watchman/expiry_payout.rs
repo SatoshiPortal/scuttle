@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use bdk_wallet::error::CreateTxError;
-use bitcoin::{psbt, sighash, Amount, FeeRate, Sequence, Transaction, Weight};
+use bitcoin::{psbt, sighash, Amount, FeeRate, ScriptBuf, Sequence, Transaction, Weight};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
@@ -110,7 +110,7 @@ impl Watchman {
 	/// tree cannot pay the mining fee.
 	async fn build_expiry_payout(
 		&self, wallet: &mut PersistedWallet, group: &PendingExpiryPayout,
-		view: BlockRef, target: FeeRate, prior: Option<&Transaction>,
+		view: BlockRef, target: FeeRate, prior: Option<&Transaction>, drain_spk: &ScriptBuf,
 	) -> anyhow::Result<(Transaction, Amount)> {
 		let roots = group.inputs.iter().map(|root| root.point()).collect::<BTreeSet<_>>();
 		let prior_sponsors = prior.into_iter().flat_map(|tx| &tx.input)
@@ -154,7 +154,7 @@ impl Watchman {
 				.set_exact_sequence(Sequence::ZERO)
 				.only_witness_utxo()
 				.unspendable(unspendable.clone())
-				.drain_to(self.drain_spk.clone())
+				.drain_to(drain_spk.clone())
 				.fee_rate(target);
 			for (root, (_, weight, sequence)) in group.inputs.iter().zip(&clauses) {
 				builder.add_foreign_utxo_with_sequence(root.point(), psbt::Input {
@@ -174,7 +174,7 @@ impl Watchman {
 			match builder.finish() {
 				Ok(psbt) => break psbt,
 				Err(CreateTxError::CoinSelection(ref missing))
-					if group.payouts.is_empty() && missing.needed == self.drain_spk.minimal_non_dust()
+					if group.payouts.is_empty() && missing.needed == drain_spk.minimal_non_dust()
 						&& forced_sponsors.len() < available_sponsors.len() => {
 					// BDK adds no input when the drain is the only output and
 					// falls below dust, so add a confirmed watchman input.
@@ -238,7 +238,7 @@ impl Watchman {
 			// An older attempt may have paid only part of a shared payout address's amount.
 			bump = latest_rate < target || {
 				let owners = group.payouts.iter().map(|out| (out.script_pubkey.clone(), out.value)).collect();
-				check_owner_outputs(owners, &latest.output, &self.drain_spk).is_err()
+				check_owner_outputs(owners, &latest.output, None).is_err()
 			};
 			if matches!(status, TxStatus::Mempool) && !bump {
 				// An earlier mempool snapshot can evict the wallet's copy in
@@ -275,21 +275,26 @@ impl Watchman {
 				for root in &group.inputs { wallet.insert_txout(root.point(), root.txout()); }
 				wallet.commit_tx(latest);
 			}
-			let (payout, fee) = match (&group.latest, bump) {
-				(Some((latest, _)), true) => self.build_expiry_payout(
-					&mut wallet, &group, view, bump_target, Some(latest)).await?,
-				(Some((latest, fee)), false) => (latest.clone(), *fee),
-				(None, _) => self.build_expiry_payout(&mut wallet, &group, view, target, None).await?,
-			};
-			if group.latest.as_ref().map(|(tx, _)| tx) != Some(&payout) {
+			let max_fee = self.config.expiry_payout_max_fee_rate;
+			let payout = if let (Some((latest, fee)), false) = (&group.latest, bump) {
+				t.store_expiry_attempt(view, group.id, latest, *fee, None, max_fee).await?;
+				latest.clone()
+			} else {
+				let (index, drain) = self.destination.script(t, &group.payouts).await?;
+				let prior = group.latest.as_ref().map(|(tx, _)| tx);
+				let (payout, fee) = self.build_expiry_payout(
+					&mut wallet, &group, view, bump_target, prior, &drain).await?;
+				if let Some(index) = index.filter(|_| payout.output.iter().any(|out| out.script_pubkey == drain)) {
+					t.advance_sweep_index(index).await?;
+				}
 				let checks = bcd::test_mempool_accept(&self.bitcoind, &[&payout]).await
 					.context("preflighting expiry payout")?;
 				ensure!(checks.len() == 1 && checks[0].allowed,
 					"Core preflight rejected expiry payout: {:?}",
 					checks.first().and_then(|check| check.reject_reason.as_deref()));
-			}
-			t.store_expiry_attempt(view, group.id, &payout, fee, &self.drain_spk,
-				self.config.expiry_payout_max_fee_rate).await?;
+				t.store_expiry_attempt(view, group.id, &payout, fee, Some(&drain), max_fee).await?;
+				payout
+			};
 			for root in &group.inputs { wallet.insert_txout(root.point(), root.txout()); }
 			wallet.commit_tx(&payout);
 			if let Some(change) = wallet.staged() {

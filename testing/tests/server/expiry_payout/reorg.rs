@@ -23,7 +23,7 @@ use ark_testing::util::{poll_interval, FutureExt};
 
 use super::{
 	idle_board, allocation_count, assert_paid, assert_six_deep, confirm_exit_path, current_share,
-	fund_watchman, grant_closures, htlc_send, mine, mine_past, onchain_spend, outputs_to, payout_output,
+	fund_watchman, grant_closures, htlc_send, mine, mine_past, onchain_spend, operator_script, outputs_to, payout_output,
 	payout_shares, receive_claim_keypair, send_request, wait_watchman_tip, wait_for_confirmation,
 	wait_for_query_lock, wait_payout, wait_synced,
 };
@@ -218,10 +218,12 @@ async fn expiry_payout_reorg_of_an_exit_pays_each_root_once() {
 	mine_past(&ctx, &srv, exiting.expiry_height()).await;
 	let db = Db::connect(&srv.config().postgres).await.unwrap();
 	let mut stored = BTreeMap::new();
+	let old_drain = operator_script(&srv);
 	for (id, root) in ids.iter().zip(roots) {
 		let (allocation, payout) = wait_payout(&db, *id).await;
 		assert_eq!(payout.input.iter().map(|input| input.previous_output).collect::<Vec<_>>(), [root]);
 		payout_output(&payout, &script, sat(98_000));
+		assert!(payout.output.iter().any(|out| out.script_pubkey == old_drain));
 		stored.insert(allocation, payout);
 	}
 	// Drop both payouts from the mempool, then confirm the holder's exit of
@@ -234,8 +236,18 @@ async fn expiry_payout_reorg_of_an_exit_pays_each_root_once() {
 		step.tx.input.iter().any(|input| input.previous_output == roots[0])).unwrap().tx.compute_txid();
 	let core = ctx.bitcoind().sync_client();
 	let conflict_block = core.custom_get_raw_transaction_info(root_exit, None).unwrap().unwrap().blockhash.unwrap();
+	// Switch from RC8's fixed address while the original signed attempts are
+	// absent from the mempool. They must still replay with their original outputs.
+	{
+		let mut cfg = srv.watchmand().config_mut();
+		cfg.sweep_address = None;
+		cfg.sweep_descriptor = Some(ctx.import_sweep_descriptor().into());
+	}
+	let original = stored.values().find(|tx| tx.input[0].previous_output == roots[1]).unwrap();
+	assert!(core.get_tx_out(&roots[1].txid, roots[1].vout, Some(true)).unwrap().is_some());
 	srv.start().await.unwrap();
 	srv.watchmand().start().await.unwrap();
+	assert_eq!(ctx.bitcoind().await_transaction(original.compute_txid()).await, *original);
 	async {
 		while payout_shares(&db, ids[0]).await.iter().any(|share| share.status != "conflicted") {
 			tokio::time::sleep(poll_interval()).await;

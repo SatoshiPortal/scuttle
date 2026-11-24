@@ -8,6 +8,7 @@
 
 mod config;
 mod daemon;
+mod destination;
 mod expiry_payout;
 mod frontier;
 mod policy;
@@ -15,6 +16,7 @@ mod signer;
 
 pub use self::config::Config;
 pub use self::daemon::Daemon;
+pub use self::destination::SweepDestination;
 pub use self::frontier::{Frontier, FrontierChainListener};
 pub use self::signer::WatchmanSigner;
 
@@ -84,7 +86,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use anyhow::Context;
-use bitcoin::{Address, Amount, FeeRate, Transaction, TxIn, TxOut, Sequence, ScriptBuf, Weight, Witness, sighash};
+use bitcoin::{Amount, FeeRate, Transaction, TxIn, TxOut, Sequence, ScriptBuf, Weight, Witness, sighash};
 use bitcoin::Txid;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -92,7 +94,7 @@ use tracing::{info, trace, warn};
 
 use ark::{ServerVtxo, ServerVtxoPolicy, VtxoId};
 use ark::vtxo::policy::signing::VtxoSigner;
-use bitcoin_ext::{BlockHeight, BlockRef, TransactionExt, TxStatus, P2TR_DUST};
+use bitcoin_ext::{BlockHeight, BlockRef, TransactionExt, TxStatus};
 use bitcoin_ext::rpc::BitcoinAsyncRpcExt;
 use bitcoin_ext::bdk::KEYCHAIN;
 use bitcoin_ext::cpfp::MakeCpfpFees;
@@ -197,8 +199,8 @@ pub struct Watchman {
 	block_table: BlockTable,
 	/// fee estimator
 	fee_estimator: Arc<FeeEstimator>,
-	/// Address where coins from claimed VTXOs are sent.
-	drain_spk: ScriptBuf,
+	/// Operator destination for claims and expiry payout change.
+	destination: SweepDestination,
 	/// Wallet used to pay fees for progress transactions.
 	watchman_wallet: InstrumentedLock<PersistedWallet>,
 	/// Shared with the SyncManager, which feeds it chain events.
@@ -215,7 +217,7 @@ impl Watchman {
 		db: Db,
 		block_table: BlockTable,
 		fee_estimator: Arc<FeeEstimator>,
-		drain_address: Address,
+		destination: impl Into<SweepDestination>,
 		wallet: InstrumentedLock<PersistedWallet>,
 		frontier: FrontierChainListener,
 		sync_height: watch::Receiver<BlockRef>,
@@ -227,7 +229,7 @@ impl Watchman {
 			db,
 			block_table,
 			fee_estimator,
-			drain_spk: drain_address.script_pubkey(),
+			destination: destination.into(),
 			watchman_wallet: wallet,
 			frontier,
 			sync_height,
@@ -817,7 +819,15 @@ impl Watchman {
 		vtxos: &[ServerVtxo],
 		fee_rate: FeeRate,
 	) -> anyhow::Result<()> {
-		let tx = self.build_claim_tx(vtxos, fee_rate).await?;
+		let (index, script) = match &self.destination {
+			SweepDestination::Fixed(script) => (None, script.clone()),
+			SweepDestination::Ranged(_) => self.db.read(async |t| self.destination.script(t, &[]).await).await?,
+		};
+		let tx = self.build_claim_tx(vtxos, fee_rate, script).await?;
+		if let Some(index) = index {
+			// Commit before broadcast, even when the RPC reply might be lost.
+			self.db.write(async |t| t.advance_sweep_index(index).await).await?;
+		}
 		let txid = tx.compute_txid();
 		self.broadcast_claim(vtxos, &tx).await?;
 
@@ -835,6 +845,7 @@ impl Watchman {
 		&self,
 		vtxos: &[ServerVtxo],
 		fee_rate: FeeRate,
+		drain_spk: ScriptBuf,
 	) -> anyhow::Result<Transaction> {
 		let mut inputs = Vec::with_capacity(vtxos.len());
 		let mut clauses = Vec::with_capacity(vtxos.len());
@@ -887,7 +898,7 @@ impl Watchman {
 
 		// Output weight (non-witness data * 4)
 		// TxOut: 8 bytes value + varint script_pubkey_len + script_pubkey
-		let output_weight = 4 * (8 + 1 + self.drain_spk.len());
+		let output_weight = 4 * (8 + 1 + drain_spk.len());
 
 		// Transaction overhead weight:
 		// - version: 4 bytes * 4 = 16
@@ -903,12 +914,12 @@ impl Watchman {
 		let fee = fee_rate.fee_wu(total_weight)
 			.context("fee computation overflow")?;
 		let output_amount = match total_input_amount.checked_sub(fee) {
-			Some(rem) if rem >= P2TR_DUST => rem,
+			Some(rem) if rem >= drain_spk.minimal_non_dust() => rem,
 			_ => bail!("insufficient funds: input {} < fee {}", total_input_amount, fee),
 		};
 
 		let output = TxOut {
-			script_pubkey: self.drain_spk.clone(),
+			script_pubkey: drain_spk,
 			value: output_amount,
 		};
 

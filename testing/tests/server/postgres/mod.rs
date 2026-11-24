@@ -47,6 +47,41 @@ use ark_testing::{sat, TestContext};
 use server::database::rounds::StoredRoundOutput;
 
 #[tokio::test]
+async fn sweep_descriptor_index_survives_rollback_and_contention() {
+	let mut ctx = TestContext::new_minimal("postgresd/sweep_descriptor_index").await;
+	ctx.init_central_postgres().await;
+	let postgres = ctx.new_postgres(&ctx.test_name).await;
+	let db = Db::create(&postgres).await.unwrap();
+	let current = async || db.read(async |t| t.next_sweep_index().await).await.unwrap();
+
+	assert_eq!(current().await, 0);
+	let failed = db.write(async |t| -> anyhow::Result<()> {
+		t.advance_sweep_index(0).await?;
+		anyhow::bail!("abort after advancing the cursor")
+	}).await.unwrap_err();
+	assert!(format!("{failed:#}").contains("abort after advancing the cursor"));
+	assert_eq!(current().await, 0);
+
+	// Both builders derived child 0 before either recorded it.
+	let (first, second) = tokio::join!(
+		db.write(async |t| t.advance_sweep_index(0).await),
+		db.write(async |t| t.advance_sweep_index(0).await),
+	);
+	first.unwrap();
+	second.unwrap();
+	assert_eq!(current().await, 1);
+
+	let last = (1u32 << 31) - 1;
+	db.write(async |t| t.advance_sweep_index(last).await).await.unwrap();
+	assert_eq!(current().await, last + 1);
+	// A delayed builder may still finish with an earlier child.
+	db.write(async |t| t.advance_sweep_index(0).await).await.unwrap();
+	assert_eq!(current().await, last + 1);
+	db.write(async |t| t.advance_sweep_index(last + 1).await).await.unwrap_err();
+	assert_eq!(current().await, last + 1);
+}
+
+#[tokio::test]
 async fn upsert_vtxo() {
 	let mut ctx = TestContext::new_minimal("postgresd/upsert_vtxo").await;
 	ctx.init_central_postgres().await;

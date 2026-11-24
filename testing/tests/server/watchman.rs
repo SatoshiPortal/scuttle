@@ -1,5 +1,5 @@
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +15,7 @@ use bitcoin::{
 	absolute, transaction, Address, Amount, FeeRate, OutPoint, Sequence, Transaction, TxIn, TxOut,
 	Txid, Weight,
 };
-use bitcoincore_rpc::json::SignRawTransactionInput;
+use bitcoincore_rpc::json::{CreateRawTransactionInput, SignRawTransactionInput};
 use bitcoin_ext::{BlockDelta, BlockHeight, TxStatus};
 use bitcoin_ext::rpc::{BitcoinRpcClient, BitcoinRpcExt};
 use server::database::Db;
@@ -119,6 +119,57 @@ async fn watchman_sweeps_boards() {
 	srv.wait_for_sync_height(tip).await;
 	assert_eq!(srv.wallet_status().await.rounds.total_balance, rounds_balance + sweep.total_output_value);
 	failures.assert_empty();
+}
+
+#[tokio::test]
+async fn watchman_sweeps_to_fresh_descriptor_addresses_across_restart() {
+	let ctx = TestContext::new("server/watchman_sweeps_to_fresh_descriptor_addresses_across_restart").await;
+	let core = ctx.bitcoind().sync_client();
+	let descriptor = ctx.import_sweep_descriptor();
+	let addresses = core.derive_addresses(&descriptor, Some([0, 1])).unwrap();
+	let srv = ctx.captaind("server").bitcoind(ctx.bitcoind_arc()).no_vtxo_pool()
+		.cfg(|cfg| cfg.vtxo_lifetime = BlockDelta::new(24))
+		.watchmand_cfg(move |cfg| {
+			cfg.sweep_address = None;
+			cfg.sweep_descriptor = Some(descriptor.into());
+			cfg.watchman.reaction_interval = Duration::from_secs(3600);
+			cfg.watchman.sweep_interval = Duration::from_secs(3600);
+		}).create().await;
+	let wm = srv.watchmand();
+	let wallet = ctx.bark_sdk("owner", &srv).funded(btc(1))
+		.cfg(|cfg| cfg.daemon_manual_sync = true).create().await;
+	let mut inputs = Vec::new();
+	let mut total = Amount::ZERO;
+	for (index, address) in addresses.into_iter().enumerate() {
+		if index == 1 {
+			wm.stop().await.unwrap();
+			wm.start().await.unwrap();
+		}
+		let board = ctx.board(&wallet, &[sat(100_000)]).await.remove(0);
+		let expiry = board.vtxo.expiry_height();
+		let mut claims = wm.subscribe_log::<ClaimBroadcast>();
+		let height = u32::try_from(ctx.bitcoind().get_block_count().await).unwrap();
+		let tip = ctx.generate_blocks(expiry.to_u32() - height).await;
+		wm.wait_for_sync_height(tip).await;
+		wm.trigger_sweep().await;
+		let sweep = claims.recv().wait_millis(15_000).await.expect("watchman sweep");
+		let tx = ctx.bitcoind().await_transaction(sweep.txid).await;
+		assert_eq!(tx.input.len(), 1);
+		assert_eq!(tx.input[0].previous_output, board.vtxo.chain_anchor());
+		let [output] = tx.output.as_slice() else { panic!("expected one sweep output"); };
+		assert_eq!(output.script_pubkey, address.assume_checked().script_pubkey());
+		total += output.value;
+		inputs.push(CreateRawTransactionInput { txid: sweep.txid, vout: 0, sequence: None });
+		let tip = ctx.generate_blocks(1).await;
+		wm.wait_for_sync_height(tip).await;
+	}
+
+	// The receiving wallet can sign for both sweep outputs using the imported account.
+	let outputs = HashMap::from([(ctx.bitcoind().get_new_address().to_string(), total - sat(1_000))]);
+	let spend = core.create_raw_transaction(&inputs, &outputs, None, None).unwrap();
+	let signed = core.sign_raw_transaction_with_wallet(&spend, None, None).unwrap();
+	assert!(signed.complete);
+	core.send_raw_transaction(&signed.transaction().unwrap()).unwrap();
 }
 
 #[tokio::test]

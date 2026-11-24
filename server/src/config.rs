@@ -752,7 +752,9 @@ pub mod watchmand {
 
 		pub bitcoind: Bitcoind,
 
-		pub sweep_address: Option<Address<NetworkUnchecked>>, // no default
+		pub sweep_address: Option<Address<NetworkUnchecked>>,
+		/// The operator's public ranged receive descriptor. Its xpub is redacted in logs.
+		pub sweep_descriptor: Option<Secret<String>>,
 
 		/// Path to a bitcoin address blocklist file
 		///

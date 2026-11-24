@@ -3,6 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bdk_wallet::ChangeSet;
 use bitcoin::{FeeRate, Transaction};
+use bitcoin::bip32::Xpub;
 use bitcoin_ext::{BlockDelta, BlockHeight, TxOutExt};
 use bitcoin_ext::rpc::{BitcoinRpcExt, RpcApi};
 
@@ -103,8 +104,16 @@ async fn pending_payout_reserves_its_sponsor_after_wallet_restore() {
 #[tokio::test]
 async fn expiry_payout_fee_bump_keeps_the_owner_output() {
 	let ctx = TestContext::new("server/expiry_payout_fee_bump_keeps_the_owner_output").await;
+	let core = ctx.bitcoind().sync_client();
+	let descriptor = ctx.import_sweep_descriptor();
+	let operator_scripts = core.derive_addresses(&descriptor, Some([0, 1])).unwrap()
+		.into_iter().map(|address| address.assume_checked().script_pubkey()).collect::<Vec<_>>();
 	let srv = ctx.captaind("server").bitcoind(ctx.bitcoind_arc()).no_vtxo_pool().watchmand()
-		.cfg(|cfg| { cfg.expiry_payouts = true; cfg.vtxo_lifetime = BlockDelta::new(24); }).create().await;
+		.cfg(|cfg| { cfg.expiry_payouts = true; cfg.vtxo_lifetime = BlockDelta::new(24); })
+		.watchmand_cfg(move |cfg| {
+			cfg.sweep_address = None;
+			cfg.sweep_descriptor = Some(descriptor.into());
+		}).create().await;
 	let (vtxo, script, _) = idle_board(&ctx, &srv, "owner", sat(100_000)).await;
 	// Confirmed watchman inputs can pay the higher fee of the replacement.
 	fund_watchman(&ctx, &srv, sat(100_000)).await;
@@ -113,6 +122,7 @@ async fn expiry_payout_fee_bump_keeps_the_owner_output() {
 	let db = Db::connect(&srv.config().postgres).await.unwrap();
 	let (allocation, first) = wait_payout(&db, vtxo.id()).await;
 	let owner_output = payout_output(&first, &script, sat(98_000));
+	assert!(first.output.iter().any(|out| out.script_pubkey == operator_scripts[0]));
 	let target = FeeRate::from_sat_per_vb(100).unwrap();
 	assert!(miner_fee(&ctx, &first).await < target * first.weight());
 
@@ -124,7 +134,6 @@ async fn expiry_payout_fee_bump_keeps_the_owner_output() {
 		config.fee_estimator.fallback_fee_rate_slow = target;
 	}
 	srv.watchmand().start().await.unwrap();
-	let core = ctx.bitcoind().sync_client();
 	let replacement = async {
 		loop {
 			let share = current_share(&db, vtxo.id()).await.unwrap();
@@ -138,6 +147,7 @@ async fn expiry_payout_fee_bump_keeps_the_owner_output() {
 	assert!(!core.get_raw_mempool().unwrap().contains(&first.compute_txid()));
 	assert_eq!(replacement.output[payout_output(&replacement, &script, sat(98_000)).vout as usize],
 		first.output[owner_output.vout as usize]);
+	assert!(replacement.output.iter().any(|out| out.script_pubkey == operator_scripts[1]));
 	let fee = miner_fee(&ctx, &replacement).await;
 	assert!(fee >= target * replacement.weight());
 	let attempts = payout_attempts(&db, allocation).await;
@@ -157,25 +167,46 @@ async fn expiry_payout_fee_bump_keeps_the_owner_output() {
 async fn expiry_payout_above_the_feerate_ceiling_is_held() {
 	let ctx = TestContext::new("server/expiry_payout_above_the_feerate_ceiling_is_held").await;
 	let ceiling = FeeRate::from_sat_per_vb(5).unwrap();
+	let operator = super::Owner::new(&[36; 32]);
+	let xpub = Xpub::from_priv(&ark::SECP, &operator.account);
+	let descriptor = format!("tr({xpub}/*)");
 	let srv = ctx.captaind("server").bitcoind(ctx.bitcoind_arc()).no_vtxo_pool()
 		.cfg(|cfg| { cfg.expiry_payouts = true; cfg.vtxo_lifetime = BlockDelta::new(24); })
 		// The regular feerate estimate of the test watchman is 7 sat/vB.
-		.watchmand_cfg(move |cfg| cfg.watchman.expiry_payout_max_fee_rate = ceiling).create().await;
-	let (vtxo, script, _) = idle_board(&ctx, &srv, "owner", sat(100_000)).await;
+		.watchmand_cfg(move |cfg| {
+			cfg.watchman.expiry_payout_max_fee_rate = ceiling;
+			cfg.sweep_address = None;
+			cfg.sweep_descriptor = Some(descriptor.into());
+		}).create().await;
+	// Use the operator's first child as the owner's mailbox to force a collision.
+	let owner = ctx.bark_sdk("owner", &srv).external_mailbox_keypair(operator.key(0))
+		.boarded(sat(100_000)).cfg(|cfg| cfg.daemon_manual_sync = true).create().await;
+	owner.stop_daemon_wait().await.unwrap();
+	let vtxo = owner.spendable_vtxos().await.unwrap().pop().unwrap();
+	let script = owner.payout_script();
 	mine_past(&ctx, &srv, vtxo.expiry_height()).await;
 	let db = Db::connect(&srv.config().postgres).await.unwrap();
 	let allocation = wait_decided(&db, vtxo.id()).await.allocation;
 	// Several sweep passes run in this time, and none may sign a payout.
 	tokio::time::sleep(Duration::from_secs(5)).await;
 	assert!(payout_attempts(&db, allocation).await.is_empty(), "a payout above the ceiling was signed");
+	assert_eq!(db.read(async |t| t.next_sweep_index().await).await.unwrap(), 0);
 
 	srv.watchmand().stop().await.unwrap();
-	srv.watchmand().config_mut().watchman.expiry_payout_max_fee_rate = FeeRate::from_sat_per_vb(1000).unwrap();
+	{
+		let mut cfg = srv.watchmand().config_mut();
+		cfg.watchman.expiry_payout_max_fee_rate = FeeRate::from_sat_per_vb(1000).unwrap();
+		// The board covers the fee at 12 sat/vB, but change would be dust.
+		cfg.fee_estimator.fallback_fee_rate_regular = FeeRate::from_sat_per_vb(12).unwrap();
+	}
 	srv.watchmand().start().await.unwrap();
 	let (paid, payout) = wait_payout(&db, vtxo.id()).await;
 	assert_eq!(paid, allocation);
 	assert!(miner_fee(&ctx, &payout).await > ceiling * payout.weight());
 	payout_output(&payout, &script, sat(98_000));
+	assert_eq!(payout.output.len(), 1);
+	let next_index = db.read(async |t| t.next_sweep_index().await).await.unwrap();
+	assert_eq!(next_index, 1, "child 0 was paid to the owner and child 1 was never used");
 }
 
 /// A decision that cannot be paid yet survives a watchman crash. A payout

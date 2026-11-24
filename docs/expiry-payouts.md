@@ -56,6 +56,35 @@ holds the payout of every VTXO under its root, so in a tree that nobody exited
 it holds the whole tree. The watchman pays the root when the spend resolves.
 
 
+# Operator sweep destination
+
+Set one top-level option in `watchmand.toml`. With `sweep_address`, the
+operator receives every sweep at that address. With `sweep_descriptor`, the
+watchman derives successive operator addresses. Two transactions built at
+the same time can pay the same address and both proceed. This setting also
+applies to operator change on an expiry payout. Each owner still receives
+their payout at `tr(M)`.
+
+Export a public receive descriptor for the server's network from a wallet
+whose spending keys you control. Use a fresh, dedicated branch with an
+unhardened wildcard, for example `wpkh(<BIP84-account-xpub>/0/*)` for a
+Wasabi native SegWit account. Compare the first address with one derived by
+the receiving wallet before enabling sweeps. Reserve that branch for watchmand
+and use a separate branch for addresses you issue in the wallet app. To switch
+an existing server, replace `sweep_address` with `sweep_descriptor` and restart
+watchmand. Keep the keys for the old destination. Pending transactions can
+still confirm with their original outputs.
+
+The database counts derivation indices from zero. To recover the receiving
+wallet, read `SELECT next_index FROM watchman_sweep_index` and scan each
+descriptor through index `next_index - 1` if the counter is positive.
+Skipped indices can exceed the wallet's usual discovery gap. A change of
+descriptor continues at the current index, so extend the receiving wallet's
+scan range when you change branches. Keep a backup of the descriptors,
+spending keys, and latest database. If you restore a stale database, switch
+to a fresh branch before restarting watchmand to prevent address reuse.
+
+
 # The fee rule
 
 The payout fee of an owner is the higher of 2,000 sats and 1% of the value that

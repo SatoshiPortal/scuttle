@@ -58,6 +58,12 @@ Use `-j 3` and thin LTO. With 16 GB of RAM, a full-LTO release build with
 To update a deployment, rebuild and run `setup.sh` again, then restart the
 units it changed (`sudo systemctl restart scuttle-captaind scuttle-posd …`).
 
+A fresh installation sends operator sweeps to a fixed miner wallet address.
+To use fresh addresses, replace `sweep_address` in `/etc/scuttle/watchmand.toml`
+with a dedicated signet `sweep_descriptor` and restart `scuttle-watchmand`.
+`setup.sh` preserves the selected destination on later runs. See the
+[operator sweep settings and recovery instructions](../../../docs/expiry-payouts.md#operator-sweep-destination).
+
 Until posd's first release its one migration can still change. When it
 does, posd refuses to start on the old database: stop posd, drop its
 database (`sudo -u postgres dropdb posd`) and run `setup.sh` again. Store

@@ -13,11 +13,12 @@ use ark::fees::{
 use anyhow::Context;
 use bitcoin::{Amount, FeeRate, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use bitcoin::absolute::LockTime;
+use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::transaction::Version;
 use bitcoin_ext::{BlockDelta, BlockHeight, FeeRateExt, TxOutExt};
 use bitcoin_ext::fee::P2A_SCRIPT;
 use bitcoin_ext::rpc::BitcoinRpcExt;
-use bitcoincore_rpc::json::SignRawTransactionInput;
+use bitcoincore_rpc::json::{ImportDescriptors, SignRawTransactionInput, Timestamp};
 use bitcoincore_rpc::RpcApi;
 use ::futures::future::always_ready;
 use futures::future::join_all;
@@ -549,6 +550,25 @@ impl TestContext {
 		}
 	}
 
+	/// Import a fresh BIP84 receiving account into the test's Bitcoin Core wallet
+	/// and return its public external descriptor for watchmand.
+	pub fn import_sweep_descriptor(&self) -> String {
+		let core = self.bitcoind().sync_client();
+		let master = Xpriv::new_master(Network::Regtest, &rand::random::<[u8; 32]>()).unwrap();
+		let path = DerivationPath::from_str("m/84'/1'/0'").unwrap();
+		let account = master.derive_priv(&ark::SECP, &path).unwrap();
+		let private = format!("wpkh([{}/84h/1h/0h]{account}/0/*)", master.fingerprint(&ark::SECP));
+		let info = core.get_descriptor_info(&private).unwrap();
+		let imports = core.import_descriptors(ImportDescriptors {
+			descriptor: format!("{private}#{}", info.checksum.unwrap()),
+			timestamp: Timestamp::Now,
+			range: Some((0, 20)),
+			..Default::default()
+		}).unwrap();
+		assert!(imports[0].success, "{:?}", imports[0].error);
+		info.descriptor
+	}
+
 	async fn watchmand_default_cfg(
 		&self,
 		name: impl AsRef<str>,
@@ -574,6 +594,7 @@ impl TestContext {
 				min_cpfp_amount: Amount::from_sat(10_000),
 			},
 			sweep_address: Some(sweep_address.to_string().parse().expect("invalid sweep address")),
+			sweep_descriptor: None,
 			data_dir: data_dir.clone(),
 			network: Network::Regtest,
 			min_trusted_confs: 1,
