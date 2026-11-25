@@ -37,6 +37,17 @@ pub struct Config {
 	#[serde(default = "default_expiry_payout_max_fee_rate", with = "crate::utils::serde::fee_rate")]
 	pub expiry_payout_max_fee_rate: FeeRate,
 
+	/// The weight charged to each owner of an expired tree, in vbytes. The
+	/// payout fee is this weight multiplied by the regular feerate of the
+	/// fee estimator when the watchman decides the tree.
+	///
+	/// Keep it equal to `fees.expiry_payout.weight_vb` of captaind, which
+	/// wallets read to estimate the fee.
+	///
+	/// The default applies to a config file without this key.
+	#[serde(default = "default_expiry_payout_weight_vb")]
+	pub expiry_payout_weight_vb: u64,
+
 	/// Minimum confirmed funds in sats required to create a CPFP transaction.
 	#[serde(with = "crate::utils::serde::string")]
 	pub min_cpfp_amount: Amount,
@@ -44,4 +55,8 @@ pub struct Config {
 
 fn default_expiry_payout_max_fee_rate() -> FeeRate {
 	FeeRate::from_sat_per_vb_u32(1000)
+}
+
+fn default_expiry_payout_weight_vb() -> u64 {
+	ark::fees::DEFAULT_EXPIRY_PAYOUT_WEIGHT_VB
 }

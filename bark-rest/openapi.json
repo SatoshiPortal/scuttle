@@ -6185,6 +6185,21 @@
           }
         }
       },
+      "ExpiryPayoutFees": {
+        "type": "object",
+        "description": "The fee of an expiry payout: `weight_vb` multiplied by the feerate of the\npayout transaction, once for each owner in each expired tree.",
+        "required": [
+          "weight_vb"
+        ],
+        "properties": {
+          "weight_vb": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The weight charged for each payout, in vbytes.",
+            "minimum": 0
+          }
+        }
+      },
       "ExpiryPayoutStateInfo": {
         "type": "string",
         "description": "The state of the expiry payout of a VTXO, as an Ark server in expiry\npayout mode reports it.",
@@ -6281,6 +6296,17 @@
         "properties": {
           "board": {
             "$ref": "#/components/schemas/BoardFees"
+          },
+          "expiry_payout": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExpiryPayoutFees",
+                "description": "The fee of an expiry payout. Present only when the Ark server is in\nexpiry payout mode."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "intra_ark": {
             "oneOf": [

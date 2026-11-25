@@ -1,11 +1,15 @@
 - Add expiry payouts, off by default with `expiry_payouts`
   In expiry payout mode the server records an owner mailbox key `M` for
   every VTXO, and the watchman pays the VTXOs of an expired tree to
-  `tr(M)` instead of to the operator. The fee is the higher of 2,000 sats
-  and 1% of the value of the owner in the tree, once for each owner in each
-  tree. The mode is fixed when the database is created. Without it, the
-  server behaves as upstream. See `docs/expiry-payouts.md`.
+  `tr(M)` instead of to the operator. The fee is flat, once for each owner
+  in each tree: the payout weight at the regular feerate of the watchman
+  when it decides the tree. The mode is fixed when the database is created.
+  Without it, the server behaves as upstream. See `docs/expiry-payouts.md`.
   [#1](https://github.com/SatoshiPortal/scuttle/pull/1)
+  - `watchman.expiry_payout_weight_vb` sets the payout weight, 200 vB by
+    default. `[fees.expiry_payout] weight_vb` publishes it with the other
+    fees and must hold the same value. A server without expiry payouts
+    refuses `[fees.expiry_payout]`.
   - `watchman.expiry_payout_max_fee_rate` caps the feerate of a payout
     transaction and of its replacements.
   - The watchman preserves pending payout fee inputs across mempool updates

@@ -304,6 +304,12 @@ impl Server {
 
 	#[allow(deprecated)] // vtxo_expiry_delta and offboard_feerate kept for old clients
 	pub fn ark_info(&self) -> ark::ArkInfo {
+		let mut fees = self.config.fees.clone();
+		if self.config.expiry_payouts && fees.expiry_payout.is_none() {
+			fees.expiry_payout = Some(ark::fees::ExpiryPayoutFees {
+				weight_vb: ark::fees::DEFAULT_EXPIRY_PAYOUT_WEIGHT_VB,
+			});
+		}
 		ark::ArkInfo {
 			network: self.config.network,
 			server_pubkey: self.server_pubkey,
@@ -323,7 +329,7 @@ impl Server {
 			max_offboard_inputs: 100,
 			max_round_participation_outputs: self.config.max_round_participation_outputs,
 			ln_receive_anti_dos_required: self.config.ln_receive_anti_dos_required,
-			fees: self.config.fees.clone(),
+			fees,
 			max_vtxo_exit_depth: self.config.max_vtxo_exit_depth,
 			tos_link: self.config.tos_link.clone(),
 		}

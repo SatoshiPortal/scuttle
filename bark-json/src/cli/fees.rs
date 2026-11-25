@@ -17,6 +17,31 @@ pub struct FeeSchedule {
 	/// `lightning_receive`.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub intra_ark: Option<IntraArkFees>,
+	/// The fee of an expiry payout. Present only when the Ark server is in
+	/// expiry payout mode.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub expiry_payout: Option<ExpiryPayoutFees>,
+}
+
+/// The fee of an expiry payout: `weight_vb` multiplied by the feerate of the
+/// payout transaction, once for each owner in each expired tree.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct ExpiryPayoutFees {
+	/// The weight charged for each payout, in vbytes.
+	pub weight_vb: u64,
+}
+
+impl From<ark::fees::ExpiryPayoutFees> for ExpiryPayoutFees {
+	fn from(v: ark::fees::ExpiryPayoutFees) -> Self {
+		Self { weight_vb: v.weight_vb }
+	}
+}
+
+impl From<ExpiryPayoutFees> for ark::fees::ExpiryPayoutFees {
+	fn from(v: ExpiryPayoutFees) -> Self {
+		Self { weight_vb: v.weight_vb }
+	}
 }
 
 /// The Lightning fees of a payment between two wallets of the same Ark server.
@@ -54,6 +79,7 @@ impl From<ark::fees::FeeSchedule> for FeeSchedule {
 			lightning_receive: v.lightning_receive.into(),
 			lightning_send: v.lightning_send.into(),
 			intra_ark: v.intra_ark.map(Into::into),
+			expiry_payout: v.expiry_payout.map(Into::into),
 		}
 	}
 }
@@ -67,6 +93,7 @@ impl From<FeeSchedule> for ark::fees::FeeSchedule {
 			lightning_receive: v.lightning_receive.into(),
 			lightning_send: v.lightning_send.into(),
 			intra_ark: v.intra_ark.map(Into::into),
+			expiry_payout: v.expiry_payout.map(Into::into),
 		}
 	}
 }

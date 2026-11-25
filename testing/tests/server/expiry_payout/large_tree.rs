@@ -18,6 +18,7 @@ use server::database::Db;
 use server_rpc::protos;
 
 use ark_testing::{sat, Captaind, TestContext};
+use ark_testing::constants::EXPIRY_PAYOUT_FEE;
 use ark_testing::util::{poll_interval, FutureExt};
 
 use super::{
@@ -138,7 +139,7 @@ async fn expiry_payout_above_ten_kilovbytes_pays_every_owner() {
 		let share = current_share(&db, leaf.id()).await.unwrap();
 		assert_eq!(share.tx.as_ref(), Some(&payout), "one root has one payout");
 		assert_eq!(share.owner, Some(owners[*index].mailbox.public_key().to_string()));
-		super::payout_output(&payout, &owners[*index].script, sat(LEAF_SAT - 2_000));
+		super::payout_output(&payout, &owners[*index].script, sat(LEAF_SAT) - EXPIRY_PAYOUT_FEE);
 	}
 	mine(&ctx, &srv, 6).await;
 	super::assert_six_deep(&ctx, &payout);

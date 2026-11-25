@@ -228,6 +228,7 @@ Class | Method | HTTP request | Description
  - [ExitTxStatusOneOf4](docs/ExitTxStatusOneOf4.md)
  - [ExitVtxoAlreadySpentState](docs/ExitVtxoAlreadySpentState.md)
  - [ExitVtxoSweptState](docs/ExitVtxoSweptState.md)
+ - [ExpiryPayoutFees](docs/ExpiryPayoutFees.md)
  - [ExpiryPayoutStateInfo](docs/ExpiryPayoutStateInfo.md)
  - [FeeEstimateQuery](docs/FeeEstimateQuery.md)
  - [FeeEstimateResponse](docs/FeeEstimateResponse.md)

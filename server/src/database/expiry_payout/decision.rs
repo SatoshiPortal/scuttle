@@ -215,9 +215,10 @@ impl Tx<'_> {
 
 	/// Lock the tree of the root, check every fact of the plan again under
 	/// those locks, then store the payout and cancel the participations it
-	/// takes. Returns the id of the expiry payout.
+	/// takes. Each owner pays `owner_fee`. Returns the id of the expiry
+	/// payout.
 	pub async fn commit_expiry_root(
-		&self, view: BlockRef, plan: ExpiryRootPlan,
+		&self, view: BlockRef, plan: ExpiryRootPlan, owner_fee: Amount,
 	) -> anyhow::Result<i64> {
 		let ExpiryRootPlan { root, vtxos, branch, decided } = plan;
 		self.check_watchman_tip(view).await?;
@@ -256,7 +257,7 @@ impl Tx<'_> {
 			}),
 			_ => None,
 		}).collect();
-		let amounts = allocate(leaves)?;
+		let amounts = allocate(leaves, owner_fee)?;
 
 		// The checks above write nothing. If a cancellation now fails, the
 		// whole decision rolls back.

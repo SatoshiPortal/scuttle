@@ -642,6 +642,12 @@ impl Config {
 			);
 		}
 
+		// Wallets read the expiry payout fee to estimate what a server in
+		// expiry payout mode charges. Another server must not publish one.
+		if self.fees.expiry_payout.is_some() && !self.expiry_payouts {
+			bail!("Invalid configuration: fees.expiry_payout requires expiry_payouts");
+		}
+
 		// At 0 the wallet trusts every unconfirmed tx, including deposits
 		// from third parties, so coin selection would spend outputs that
 		// a double-spend can still invalidate.
@@ -1043,6 +1049,19 @@ mod test {
 
 		cfg.offboard_check_interval = Duration::from_secs(31);
 		cfg.validate().expect_err("Invalid because sessions would outlive their timeout");
+	}
+
+	#[test]
+	fn validate_expiry_payout_fee_requires_expiry_payouts() {
+		let mut cfg = Config::load(DEFAULT_CAPTAIND_CONFIG_PATH).unwrap();
+		cfg.bitcoind.cookie = Some(".cookie".into());
+		cfg.fees.expiry_payout = Some(ark::fees::ExpiryPayoutFees { weight_vb: 100 });
+
+		let err = cfg.validate().expect_err("an expiry payout fee without expiry payouts is invalid");
+		assert!(err.to_string().contains("fees.expiry_payout"), "{}", err);
+
+		cfg.expiry_payouts = true;
+		cfg.validate().expect("an expiry payout fee in expiry payout mode is valid");
 	}
 
 	#[test]

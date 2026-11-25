@@ -13,6 +13,7 @@ use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 use ark::{ServerVtxo, ServerVtxoPolicy, VtxoPolicy};
+use ark::fees::ExpiryPayoutFees;
 use ark::vtxo::policy::signing::VtxoSigner;
 use bitcoin_ext::{BlockRef, TxStatus};
 
@@ -334,6 +335,9 @@ impl Watchman {
 	/// Decide one root: one expiry payout and one payout transaction. Each
 	/// root reads the current watchman tip, so a new block does not stop a
 	/// long pass.
+	///
+	/// Each owner pays the payout weight at the regular feerate of this
+	/// moment, the feerate that the payout transaction is built with.
 	async fn decide_expiry_root(&self, root: ServerVtxo) -> anyhow::Result<()> {
 		let Some(view) = self.db.read(async |tx| tx.get_highest_block(BlockTable::Watchmand).await).await? else {
 			return Ok(());
@@ -342,8 +346,12 @@ impl Watchman {
 		let Some(plan) = self.db.read(async |tx| tx.plan_expiry_root(view, root.clone()).await).await? else {
 			return Ok(());
 		};
-		let id = self.db.write(async |tx| tx.commit_expiry_root(view, plan).await).await?;
-		info!(expiry_payout_id = id, root = %root.id(), "Expiry payout decision committed");
+		let fee_rate = self.fee_estimator.regular();
+		let owner_fee = ExpiryPayoutFees { weight_vb: self.config.expiry_payout_weight_vb }
+			.calculate(fee_rate).context("expiry payout fee overflow")?;
+		let id = self.db.write(async |tx| tx.commit_expiry_root(view, plan, owner_fee).await).await?;
+		info!(expiry_payout_id = id, root = %root.id(), fee_rate_sat_per_kwu = fee_rate.to_sat_per_kwu(),
+			owner_fee_sat = owner_fee.to_sat(), "Expiry payout decision committed");
 		Ok(())
 	}
 }

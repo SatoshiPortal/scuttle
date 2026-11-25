@@ -27,6 +27,7 @@ use server_rpc::protos;
 use server_rpc::protos::lightning_payment_status::PaymentStatus;
 
 use ark_testing::{btc, sat, Captaind, TestContext};
+use ark_testing::constants::EXPIRY_PAYOUT_FEE;
 use ark_testing::daemon::lightningd::Lightningd;
 use ark_testing::exit::complete_exit;
 use ark_testing::lightning::sign_lightning_send_request;
@@ -149,7 +150,7 @@ async fn expiry_payout_pays_an_unused_htlc_of_a_paid_hash() {
 	let tip = mine_past(&ctx, &srv, deadline).await;
 	assert_eq!(proposal(&db, unused, tip).await.disposition, birth_owner(&db, unused.id()).await);
 	let (_, payout) = wait_payout(&db, unused.id()).await;
-	assert_paid(&ctx, &srv, &payout, &wallet.payout_script(), sat(98_000)).await;
+	assert_paid(&ctx, &srv, &payout, &wallet.payout_script(), sat(100_000) - EXPIRY_PAYOUT_FEE).await;
 	let share = current_share(&db, unused.id()).await.unwrap();
 	assert_eq!(share.owner, Some(wallet.mailbox_identifier().as_pubkey().to_string()));
 	assert_eq!(payout_shares(&db, unused.id()).await.len(), 1);
@@ -214,7 +215,7 @@ async fn expiry_payout_refunds_a_send_failed_during_restart() {
 	mine_past(&ctx, &srv, deadline).await;
 	let (_, payout) = wait_payout(&db, source.id()).await;
 	assert_eq!(payout.input.iter().map(|input| input.previous_output).collect::<Vec<_>>(), [input.chain_anchor()]);
-	assert_paid(&ctx, &srv, &payout, &script, sat(98_000)).await;
+	assert_paid(&ctx, &srv, &payout, &script, sat(100_000) - EXPIRY_PAYOUT_FEE).await;
 	let shares = payout_shares(&db, source.id()).await;
 	assert_eq!(shares.len(), 1);
 	assert!(shares[0].owner.is_some(), "the sats of a failed send go to their owner");
@@ -318,7 +319,7 @@ async fn expiry_payout_leaves_a_pending_send_alone() {
 
 	mine_past(&ctx, &srv, earlier.expiry_height()).await;
 	let earlier_payout = super::mine_until_payout(&ctx, &srv, &db, earlier.id()).await;
-	assert_paid(&ctx, &srv, &earlier_payout, &earlier_script, sat(98_000)).await;
+	assert_paid(&ctx, &srv, &earlier_payout, &earlier_script, sat(100_000) - EXPIRY_PAYOUT_FEE).await;
 	assert_pending().await;
 
 	cancel_hold_invoice(&lightning.external, hash).await;
@@ -330,9 +331,10 @@ async fn expiry_payout_leaves_a_pending_send_alone() {
 	}
 	let payout = super::mine_until_payout(&ctx, &srv, &db, source.id()).await;
 	assert!(earlier_payout.input.iter().all(|a| payout.input.iter().all(|b| a.previous_output != b.previous_output)));
-	assert_paid(&ctx, &srv, &payout, &script, sat(98_000)).await;
+	assert_paid(&ctx, &srv, &payout, &script, sat(100_000) - EXPIRY_PAYOUT_FEE).await;
+	let paid = sat(100_000) - EXPIRY_PAYOUT_FEE;
 	for (script, payout) in [(&earlier_script, &earlier_payout), (&script, &payout)] {
-		assert_eq!(outputs_to(&ctx, script, start), [(payout_output(payout, script, sat(98_000)), sat(98_000))],
+		assert_eq!(outputs_to(&ctx, script, start), [(payout_output(payout, script, paid), paid)],
 			"each owner is paid once");
 	}
 	assert_eq!(attempt_count(&db, hash).await, 1);

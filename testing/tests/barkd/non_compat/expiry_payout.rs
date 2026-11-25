@@ -2,11 +2,12 @@ use bitcoin::{Amount, Network};
 use bitcoin_ext::BlockDelta;
 use bitcoin_ext::rpc::{BitcoinRpcExt, RpcApi};
 
+use ark::fees::DEFAULT_EXPIRY_PAYOUT_WEIGHT_VB;
 use bark_json::primitives::{ExpiryPayoutStateInfo, VtxoStateInfo};
 
 use ark_testing::{sat, TestContext};
 use ark_testing::barkd_helpers::wait_for_exits_claimable;
-use ark_testing::constants::BOARD_CONFIRMATIONS;
+use ark_testing::constants::{BOARD_CONFIRMATIONS, EXPIRY_PAYOUT_FEE};
 use ark_testing::daemon::barkd::Barkd;
 use ark_testing::util::{poll_interval, FutureExt};
 
@@ -40,7 +41,10 @@ async fn expiry_payout_is_reported_after_restart_and_restore() {
 	barkd.sync().await;
 	let vtxo = barkd.vtxos(None).await.remove(0).vtxo;
 	let id = vtxo.id.to_string();
-	let amount = vtxo.amount - sat(2_000);
+	let amount = vtxo.amount - EXPIRY_PAYOUT_FEE;
+	// barkd returns the weight of the payout fee with the other fees.
+	let weight = barkd.ark_info().await.fees.expiry_payout.map(|fees| fees.weight_vb);
+	assert_eq!(weight, Some(DEFAULT_EXPIRY_PAYOUT_WEIGHT_VB));
 
 	barkd.stop().await.unwrap();
 	ctx.bitcoind().fund_addr(srv.watchmand().wait_wallet_address().await, sat(100_000)).await;

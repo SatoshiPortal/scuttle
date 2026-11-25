@@ -30,7 +30,7 @@ use server_log::RoundFinished;
 use server_rpc::protos;
 
 use ark_testing::{btc, sat, Captaind, TestContext};
-use ark_testing::constants::{BOARD_CONFIRMATIONS, ROUND_CONFIRMATIONS};
+use ark_testing::constants::{BOARD_CONFIRMATIONS, EXPIRY_PAYOUT_FEE, ROUND_CONFIRMATIONS};
 use ark_testing::exit::complete_exit;
 use ark_testing::util::{poll_interval, FutureExt};
 
@@ -405,10 +405,10 @@ async fn expiry_payout_board_registration_uses_the_funding_script() {
 async fn assert_paid_to_owner(ctx: &TestContext, srv: &Captaind, owner: &Owner, vtxo: VtxoId) {
 	let db = Db::connect(&srv.config().postgres).await.unwrap();
 	let payout = mine_until_payout(ctx, srv, &db, vtxo).await;
-	assert_paid(ctx, srv, &payout, &owner.script, sat(98_000)).await;
+	assert_paid(ctx, srv, &payout, &owner.script, sat(100_000) - EXPIRY_PAYOUT_FEE).await;
 	let share = current_share(&db, vtxo).await.unwrap();
 	assert_eq!((share.owner, share.gross, share.fee, share.payout),
-		(Some(owner.mailbox.public_key().to_string()), sat(100_000), sat(2_000), sat(98_000)));
+		(Some(owner.mailbox.public_key().to_string()), sat(100_000), EXPIRY_PAYOUT_FEE, sat(100_000) - EXPIRY_PAYOUT_FEE));
 }
 
 /// A board the holder never registers is paid to the mailbox it gave when
@@ -601,7 +601,7 @@ async fn expiry_payout_refunds_unregistered_isolated_dust_to_sender() {
 
 	mine_past(&ctx, &srv, dust.expiry_height()).await;
 	let payout = mine_until_payout(&ctx, &srv, &db, dust.id()).await;
-	assert_paid(&ctx, &srv, &payout, &sender.script, sat(98_000)).await;
+	assert_paid(&ctx, &srv, &payout, &sender.script, sat(100_000) - EXPIRY_PAYOUT_FEE).await;
 	let share = current_share(&db, dust.id()).await.unwrap();
 	assert_eq!(share.owner, Some(sender.mailbox.public_key().to_string()));
 	assert!(!payout.output.iter().any(|o| o.script_pubkey == recipient.script));
@@ -631,8 +631,8 @@ async fn expiry_payout_registered_isolated_dust_follows_recipient() {
 	assert_eq!(bound.get(&dust.id()), Some(&recipient.mailbox_id().as_pubkey()));
 	mine_past(&ctx, &srv, dust.expiry_height()).await;
 	let payout = mine_until_payout(&ctx, &srv, &db, dust.id()).await;
-	assert_paid(&ctx, &srv, &payout, &recipient.script, sat(8_160)).await;
-	assert_paid(&ctx, &srv, &payout, &sender.script, sat(87_840)).await;
+	assert_paid(&ctx, &srv, &payout, &recipient.script, sat(10_160) - EXPIRY_PAYOUT_FEE).await;
+	assert_paid(&ctx, &srv, &payout, &sender.script, sat(89_840) - EXPIRY_PAYOUT_FEE).await;
 	let share = current_share(&db, dust.id()).await.unwrap();
 	assert_eq!(share.owner, Some(recipient.mailbox.public_key().to_string()));
 }

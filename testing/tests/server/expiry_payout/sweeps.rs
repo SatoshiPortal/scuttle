@@ -12,6 +12,7 @@ use server::database::Db;
 use server_log::{ClaimBroadcast, ClaimBroadcastFailure, ClaimChunkBroadcastFailure, ProgressCpfpFailure};
 
 use ark_testing::{btc, sat, TestContext};
+use ark_testing::constants::EXPIRY_PAYOUT_FEE;
 use ark_testing::exit::progress_exit_until_awaiting_delta;
 use ark_testing::util::FutureExt;
 
@@ -155,5 +156,5 @@ async fn watchman_sweeps_offboard_forfeit_and_pays_expired_board() {
 		"forfeit output {} should be spent by the sweep", forfeit_point,
 	);
 
-	assert_paid(&ctx, &srv, &payout, &owner_script, sat(98_000)).await;
+	assert_paid(&ctx, &srv, &payout, &owner_script, sat(100_000) - EXPIRY_PAYOUT_FEE).await;
 }

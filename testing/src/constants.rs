@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use bitcoin::Amount;
+
 pub const BOARD_CONFIRMATIONS: u32 = 3;
 pub const ROUND_CONFIRMATIONS: u32 = 6;
 pub const OFFBOARD_CONFIRMATIONS: u32 = 0;
@@ -9,6 +11,13 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Default time test helpers wait for a daemon to reach a state.
 /// Can be overridden with the TEST_WAIT_TIMEOUT_MILLIS env var.
 pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The regular fallback feerate of the test watchmand, in sat/vB.
+pub const WATCHMAND_REGULAR_FEE_RATE_SAT_VB: u32 = 7;
+/// The expiry payout fee of each owner with the test watchmand: the default
+/// payout weight at [WATCHMAND_REGULAR_FEE_RATE_SAT_VB].
+pub const EXPIRY_PAYOUT_FEE: Amount = Amount::from_sat(
+	ark::fees::DEFAULT_EXPIRY_PAYOUT_WEIGHT_VB * WATCHMAND_REGULAR_FEE_RATE_SAT_VB as u64,
+);
 
 pub mod env {
 	pub const TEST_DIRECTORY: &str = "TEST_DIRECTORY";

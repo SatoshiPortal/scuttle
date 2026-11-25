@@ -7,12 +7,6 @@ use bitcoin::{Amount, ScriptBuf};
 
 use ark::VtxoId;
 
-/// The fee for all the payouts of one root to one script: the higher of
-/// 2,000 sats and 1%.
-fn payout_fee(gross: Amount) -> Amount {
-	Amount::from_sat(2_000.max(gross.to_sat().div_ceil(100)))
-}
-
 /// An owner VTXO of an expired tree: its payout script and its amount.
 pub(crate) struct OwnerLeaf {
 	pub id: VtxoId,
@@ -29,10 +23,10 @@ pub(crate) struct LeafAllocation {
 }
 
 /// Split the payout of one root between its owner VTXOs. The VTXOs of one
-/// script share one fee, which is charged in VTXO id order, so the amount
-/// stored for each VTXO does not depend on the input order. The mining fee
-/// is not charged to the owners.
-pub(crate) fn allocate(leaves: Vec<OwnerLeaf>) -> anyhow::Result<Vec<LeafAllocation>> {
+/// script share one fee, `owner_fee`, which is charged in VTXO id order, so
+/// the amount stored for each VTXO does not depend on the input order. The
+/// mining fee is not charged to the owners.
+pub(crate) fn allocate(leaves: Vec<OwnerLeaf>, owner_fee: Amount) -> anyhow::Result<Vec<LeafAllocation>> {
 	let mut ids = BTreeSet::new();
 	let mut groups = BTreeMap::<ScriptBuf, Vec<OwnerLeaf>>::new();
 	for leaf in leaves {
@@ -48,7 +42,7 @@ pub(crate) fn allocate(leaves: Vec<OwnerLeaf>) -> anyhow::Result<Vec<LeafAllocat
 			sum.checked_add(leaf.amount).context("expiry group amount overflow"),
 		)?;
 		// A remainder below dust cannot be paid, so the owner forfeits it.
-		let net = gross.checked_sub(payout_fee(gross)).unwrap_or(Amount::ZERO);
+		let net = gross.checked_sub(owner_fee).unwrap_or(Amount::ZERO);
 		let group_fee = if net < script.minimal_non_dust() { gross } else { gross - net };
 		let mut remaining_fee = group_fee;
 		for leaf in group {
@@ -84,10 +78,13 @@ mod tests {
 		ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([1; 20]))
 	}
 
+	/// The fee of the tests: 200 vB at 10 sat/vB.
+	const FEE: Amount = Amount::from_sat(2_000);
+
 	#[test]
 	fn payout_fee_many_small_leaves_pay_one_non_dust_output() {
 		let script = wpkh();
-		let plan = allocate((0..30).map(|i| leaf(i, 100, &script)).collect()).unwrap();
+		let plan = allocate((0..30).map(|i| leaf(i, 100, &script)).collect(), FEE).unwrap();
 		assert_eq!(plan.len(), 30);
 		assert_eq!(plan.iter().map(|leaf| leaf.payout).sum::<Amount>(), Amount::from_sat(1_000));
 		assert_eq!(plan.iter().map(|a| a.fee.to_sat()).sum::<u64>(), 2_000);
@@ -106,9 +103,9 @@ mod tests {
 			ScriptBuf::new_p2tr(&secp, key.x_only_public_key().0, None),
 		] {
 			let dust = script.minimal_non_dust().to_sat();
-			let paid = allocate(vec![leaf(1, 2_000 + dust, &script)]).unwrap();
+			let paid = allocate(vec![leaf(1, 2_000 + dust, &script)], FEE).unwrap();
 			assert_eq!(paid.iter().map(|leaf| leaf.payout).sum::<Amount>().to_sat(), dust);
-			let forfeited = allocate(vec![leaf(1, 1_999 + dust, &script)]).unwrap();
+			let forfeited = allocate(vec![leaf(1, 1_999 + dust, &script)], FEE).unwrap();
 			assert_eq!(forfeited[0].payout, Amount::ZERO);
 			assert_eq!(forfeited[0].fee.to_sat(), 1_999 + dust);
 		}
@@ -117,8 +114,8 @@ mod tests {
 	#[test]
 	fn payout_fee_order_does_not_change_leaf_attribution() {
 		let script = wpkh();
-		let a = allocate(vec![leaf(2, 2_000, &script), leaf(1, 400, &script)]).unwrap();
-		let b = allocate(vec![leaf(1, 400, &script), leaf(2, 2_000, &script)]).unwrap();
+		let a = allocate(vec![leaf(2, 2_000, &script), leaf(1, 400, &script)], FEE).unwrap();
+		let b = allocate(vec![leaf(1, 400, &script), leaf(2, 2_000, &script)], FEE).unwrap();
 		assert_eq!(a, b);
 		assert_eq!(a[0].fee.to_sat(), 400);
 		assert_eq!(a[1].fee.to_sat(), 1_600);
@@ -127,14 +124,14 @@ mod tests {
 	#[test]
 	fn fee_rejects_duplicate_payout_share() {
 		let script = wpkh();
-		assert!(allocate(vec![leaf(1, 2_000, &script), leaf(1, 2_000, &script)]).is_err());
+		assert!(allocate(vec![leaf(1, 2_000, &script), leaf(1, 2_000, &script)], FEE).is_err());
 	}
 
 	#[test]
-	fn payout_fee_conserves_each_leaf_across_policy_boundary() {
+	fn payout_fee_conserves_each_leaf() {
 		let script = wpkh();
 		for total in 1..4_000 {
-			for a in allocate(vec![leaf(1, total, &script)]).unwrap() {
+			for a in allocate(vec![leaf(1, total, &script)], FEE).unwrap() {
 				assert_eq!(a.gross, a.fee + a.payout);
 			}
 		}
@@ -143,11 +140,11 @@ mod tests {
 	#[test]
 	fn payout_fee_separate_outputs_charge_up_to_gross() {
 		let script = wpkh();
-		let combined = allocate(vec![leaf(1, 1_200, &script), leaf(2, 1_200, &script)]).unwrap();
+		let combined = allocate(vec![leaf(1, 1_200, &script), leaf(2, 1_200, &script)], FEE).unwrap();
 		assert_eq!(combined.len(), 2);
 		assert_eq!(combined.iter().map(|leaf| leaf.payout).sum::<Amount>().to_sat(), 400);
 		for id in [1, 2] {
-			let separate = allocate(vec![leaf(id, 1_200, &script)]).unwrap();
+			let separate = allocate(vec![leaf(id, 1_200, &script)], FEE).unwrap();
 			assert!(separate.iter().all(|leaf| leaf.payout == Amount::ZERO));
 			assert_eq!(separate[0].fee.to_sat(), 1_200);
 		}
@@ -157,23 +154,25 @@ mod tests {
 	fn fee_is_charged_once_per_root() {
 		let script = wpkh();
 		// One root: two VTXOs of one owner share one fee.
-		let shared = allocate(vec![leaf(1, 50_000, &script), leaf(2, 50_001, &script)]).unwrap();
+		let shared = allocate(vec![leaf(1, 50_000, &script), leaf(2, 50_001, &script)], FEE).unwrap();
 		assert_eq!(shared.iter().map(|leaf| leaf.fee).sum::<Amount>().to_sat(), 2_000);
 		assert_eq!(shared.iter().map(|leaf| leaf.payout).sum::<Amount>().to_sat(), 98_001);
-		// Two roots at the same height: each allocation charges its own minimum.
-		let first = allocate(vec![leaf(1, 50_000, &script)]).unwrap();
-		let second = allocate(vec![leaf(2, 50_001, &script)]).unwrap();
+		// Two roots at the same height: each allocation charges its own fee.
+		let first = allocate(vec![leaf(1, 50_000, &script)], FEE).unwrap();
+		let second = allocate(vec![leaf(2, 50_001, &script)], FEE).unwrap();
 		assert_eq!(first[0].fee.to_sat(), 2_000);
 		assert_eq!(second[0].fee.to_sat(), 2_000);
 		assert_eq!(first[0].payout.to_sat() + second[0].payout.to_sat(), 100_001 - 4_000);
 	}
 
 	#[test]
-	fn percentage_fee_rounds_up_without_overflow() {
-		for (gross, fee) in [(100_000, 2_000), (100_001, 2_000), (200_000, 2_000),
-			(200_001, 2_001),
-			(u64::MAX, u64::MAX.div_ceil(100))] {
-			assert_eq!(payout_fee(Amount::from_sat(gross)).to_sat(), fee);
+	fn fee_is_flat() {
+		let script = wpkh();
+		for gross in [2_330, 100_000, 100_000_000, 21_000_000 * 100_000_000] {
+			let plan = allocate(vec![leaf(1, gross, &script)], FEE).unwrap();
+			assert_eq!((plan[0].fee, plan[0].payout.to_sat()), (FEE, gross - 2_000));
 		}
+		let free = allocate(vec![leaf(1, 330, &script)], Amount::ZERO).unwrap();
+		assert_eq!((free[0].fee, free[0].payout.to_sat()), (Amount::ZERO, 330));
 	}
 }

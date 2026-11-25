@@ -20,7 +20,7 @@ use server_log::ProgressBroadcast;
 use server_rpc::protos;
 
 use ark_testing::{btc, sat, TestContext};
-use ark_testing::constants::ROUND_CONFIRMATIONS;
+use ark_testing::constants::{EXPIRY_PAYOUT_FEE, ROUND_CONFIRMATIONS};
 use ark_testing::daemon::captaind::{self, ArkClient};
 use ark_testing::exit::progress_exit_until_awaiting_delta;
 use ark_testing::util::{poll_interval, FutureExt};
@@ -275,7 +275,7 @@ async fn offboard_race(name: &str, race: OffboardRace) {
 		assert_eq!(refusal.metadata().get("expiry-payout-reason").unwrap(), "decided_for_payout");
 		let state = db.read(async |t| t.get_user_vtxos_by_id(&[id]).await).await.unwrap();
 		assert_eq!(state[0].offboarded_in, None, "the refused offboard is not stored");
-		payout_output(&payout, &script, vtxo.amount() - sat(2_000));
+		payout_output(&payout, &script, vtxo.amount() - EXPIRY_PAYOUT_FEE);
 		mine(&ctx, &srv, 6).await;
 		assert_eq!(ctx.bitcoind().get_received_by_address(&address), sat(0));
 	} else {

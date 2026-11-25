@@ -68,9 +68,34 @@ to a fresh branch before restarting watchmand to prevent address reuse.
 
 # The fee rule
 
-The payout fee of an owner is the higher of 2,000 sats and 1% of the value that
-the owner has in the tree. The server charges it once for each owner in each
-expired tree, whatever the number of VTXOs of the owner.
+The payout fee of an owner is flat: the payout weight multiplied by the
+feerate of the watchman. The server charges it once for each owner in each
+expired tree, whatever the number or the value of the VTXOs of the owner.
+
+The watchman reads the feerate when it decides the tree. It is the regular
+feerate of its fee estimator, the feerate that it builds the payout
+transaction with. The fee is fixed from then on. When bitcoind has no fee
+estimate, the fee estimator uses `fallback_fee_rate_regular`, so that rate
+then sets the fee.
+
+Set the payout weight in both configurations, to the same value. The default
+is 200 vB.
+
+- `watchman.expiry_payout_weight_vb` in the watchmand configuration sets the
+  weight that the watchman charges.
+- `[fees.expiry_payout] weight_vb` in the captaind configuration sets the
+  weight that the server publishes with its other fees. A server without
+  expiry payouts refuses this section.
+
+The weight does not have to match the size of the payout transaction. When
+the fees of the owners and the value that the operator has in the tree do not
+cover the mining fee, the watchman adds confirmed inputs of its wallet.
+
+A wallet reads the weight from the fee schedule of the server:
+`ArkInfo::fees.expiry_payout` in the SDK, and `fees.expiry_payout.weight_vb`
+of `GET /api/v1/wallet/ark-info` in barkd. `ExpiryPayoutFees::calculate`
+multiplies it by a feerate. The feerate of the wallet is not the feerate of
+the watchman, so the result is an estimate.
 
 If the payout after the fee is below the dust limit, the server pays nothing and
 reports the VTXOs as forfeited. The operator keeps that value.

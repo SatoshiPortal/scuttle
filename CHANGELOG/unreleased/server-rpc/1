@@ -2,4 +2,6 @@
   A client uses it when the server offers it. It adds the owner mailbox to the
   requests that make a VTXO and the expiry payout to the VTXO status. The fields that it adds to upstream
   messages are numbered from 1000.
+  - `FeeSchedule.expiry_payout` carries the payout weight of a server in
+    expiry payout mode.
   [#1](https://github.com/SatoshiPortal/scuttle/pull/1)

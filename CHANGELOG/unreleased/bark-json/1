@@ -1,3 +1,5 @@
 - Add the expiry payout of a VTXO
   `WalletVtxoInfo` reports the VTXO’s `expiry_payout` state.
   [#1](https://github.com/SatoshiPortal/scuttle/pull/1)
+  - `FeeSchedule` has the optional `expiry_payout`, with the payout weight
+    `weight_vb` of a server in expiry payout mode.

@@ -17,7 +17,7 @@ use server::database::{BlockTable, Db, SpendState};
 use server_rpc::protos;
 
 use ark_testing::{btc, sat, Bitcoind, TestContext};
-use ark_testing::constants::BOARD_CONFIRMATIONS;
+use ark_testing::constants::{BOARD_CONFIRMATIONS, EXPIRY_PAYOUT_FEE};
 use ark_testing::exit::{complete_exit, progress_exit_until_awaiting_delta};
 use ark_testing::util::{poll_interval, FutureExt};
 
@@ -47,7 +47,7 @@ async fn expiry_payout_survives_a_reorg_of_its_block() {
 	mine_past(&ctx, &srv, vtxo.expiry_height()).await;
 	let db = Db::connect(&srv.config().postgres).await.unwrap();
 	let (allocation, payout) = wait_payout(&db, vtxo.id()).await;
-	assert_paid(&ctx, &srv, &payout, &script, sat(98_000)).await;
+	assert_paid(&ctx, &srv, &payout, &script, sat(100_000) - EXPIRY_PAYOUT_FEE).await;
 	let old_block = assert_six_deep(&ctx, &payout);
 	let old_tip = core_tip(&ctx).await;
 	wait_for_confirmation(&db, allocation, old_tip, old_block.hash).await;
@@ -196,9 +196,10 @@ async fn expiry_payout_reorg_of_an_exit_pays_each_root_once() {
 		cfg.expiry_payouts = true;
 		cfg.vtxo_lifetime = BlockDelta::new(24);
 		cfg.vtxo_exit_delta = BlockDelta::new(3);
-	}).create().await;
+	}).watchmand_cfg(|cfg| cfg.watchman.expiry_payout_weight_vb = 300).create().await;
 	// The watchman stays unfunded until the new branch: each payout pays its
-	// mining fee from the payout fee.
+	// mining fee from the payout fee, 300 vB at 7 sat/vB.
+	let fee = sat(2_100);
 	let wallet = ctx.bark("holder", &srv).cfg(|cfg| cfg.daemon_manual_sync = true).create().await;
 	ctx.fund_bark(&wallet, sat(500_000)).await;
 	let first = wallet.board(sat(100_000)).await;
@@ -222,7 +223,7 @@ async fn expiry_payout_reorg_of_an_exit_pays_each_root_once() {
 	for (id, root) in ids.iter().zip(roots) {
 		let (allocation, payout) = wait_payout(&db, *id).await;
 		assert_eq!(payout.input.iter().map(|input| input.previous_output).collect::<Vec<_>>(), [root]);
-		payout_output(&payout, &script, sat(98_000));
+		payout_output(&payout, &script, sat(100_000) - fee);
 		assert!(payout.output.iter().any(|out| out.script_pubkey == old_drain));
 		stored.insert(allocation, payout);
 	}
@@ -363,7 +364,7 @@ async fn expiry_payout_reorg_of_an_exit_pays_each_root_once() {
 					.is_some_and(|info| info.confirmations.unwrap_or(0) > 0)
 		}).collect::<Vec<_>>();
 		assert_eq!(payers_of_root.len(), 1, "each root is paid exactly once");
-		payout_output(payers_of_root[0], &script, sat(98_000));
+		payout_output(payers_of_root[0], &script, sat(100_000) - fee);
 		payers.insert(*id, payers_of_root[0].compute_txid());
 	}
 	assert_paid_once(&db, &payers).await;

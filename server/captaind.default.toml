@@ -355,6 +355,15 @@ ppm_expiry_table = [
 # base_fee_sat = 0
 # ppm = 0
 
+# Expiry payout fee, only with expiry_payouts = true. Wallets multiply
+# weight_vb by a feerate to estimate the payout fee. The watchman charges each
+# owner of an expired tree watchman.expiry_payout_weight_vb of watchmand.toml
+# at its regular feerate, so keep both equal. Without this section the server
+# publishes 200.
+#
+# [fees.expiry_payout]
+# weight_vb = 200
+
 #############
 # VTXO POOL #
 #############

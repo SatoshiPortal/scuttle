@@ -353,6 +353,7 @@ impl From<ark::fees::FeeSchedule> for protos::FeeSchedule {
 				lightning_send: Some(f.lightning_send.into()),
 				lightning_receive: Some(f.lightning_receive.into()),
 			}),
+			expiry_payout: v.expiry_payout.map(|f| protos::ExpiryPayoutFees { weight_vb: f.weight_vb }),
 		}
 	}
 }
@@ -373,6 +374,7 @@ impl TryFrom<protos::FeeSchedule> for ark::fees::FeeSchedule {
 						.ok_or("missing intra-Ark lightning receive fees")?.into(),
 				})
 			}).transpose()?,
+			expiry_payout: v.expiry_payout.map(|f| ark::fees::ExpiryPayoutFees { weight_vb: f.weight_vb }),
 		})
 	}
 }

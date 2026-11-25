@@ -15,13 +15,14 @@ use server_log::ExpiryHoldObserved;
 use server_rpc::protos;
 
 use ark_testing::{btc, sat, Captaind, TestContext};
-use ark_testing::constants::{BOARD_CONFIRMATIONS, ROUND_CONFIRMATIONS};
+use ark_testing::constants::{BOARD_CONFIRMATIONS, EXPIRY_PAYOUT_FEE, ROUND_CONFIRMATIONS};
 use ark_testing::payout_wallet::PayoutWallet;
 use ark_testing::util::{poll_interval, FutureExt};
 
 use super::{
 	assert_paid, current_share, fund_watchman, htlc_send, input_allocations, miner_fee, mine,
-	mine_past, mine_until_payout, operator_script, payout_attempts, payout_output, payout_shares,
+	mine_past, mine_until_payout, operator_script, owner_fee, payout_attempts, payout_fee, payout_output,
+	payout_shares, SPONSORED_WEIGHT_VB,
 	wait_decided, wait_payout,
 };
 
@@ -38,8 +39,11 @@ async fn expiry_payout_can_be_spent_from_the_seed() {
 			cfg.vtxo_lifetime = BlockDelta::new(24);
 			cfg.fees.board = BoardFees { min_fee: sat(330), base_fee: sat(0), ppm: PpmFeeRate::ZERO };
 		})
-		// At this feerate the payout fee needs a watchman input.
-		.watchmand_cfg(|cfg| cfg.fee_estimator.fallback_fee_rate_regular = FeeRate::from_sat_per_vb(30).unwrap())
+		// The payout fee does not cover the payout, so it needs a watchman input.
+		.watchmand_cfg(|cfg| {
+			cfg.watchman.expiry_payout_weight_vb = SPONSORED_WEIGHT_VB;
+			cfg.fee_estimator.fallback_fee_rate_regular = FeeRate::from_sat_per_vb(30).unwrap();
+		})
 		.create().await;
 	let mnemonic = bip39::Mnemonic::generate(12).unwrap();
 	let wallet = ctx.bark_sdk("owner", &srv).mnemonic(mnemonic.clone()).funded(sat(200_000))
@@ -59,7 +63,7 @@ async fn expiry_payout_can_be_spent_from_the_seed() {
 	let (_, payout) = wait_payout(&db, board.id()).await;
 	assert!(payout.input.iter().any(|input| input.previous_output == board.vtxo.chain_anchor()));
 	assert!(payout.input.iter().any(|input| input.previous_output == fee_input));
-	let amount = board.amount() - sat(2_000);
+	let amount = board.amount() - payout_fee(SPONSORED_WEIGHT_VB, 30);
 	let point = payout_output(&payout, &script, amount);
 	let operator = operator_script(&srv);
 	assert!(payout.output.iter().all(|output| output.script_pubkey == script || output.script_pubkey == operator));
@@ -82,11 +86,14 @@ async fn expiry_payout_can_be_spent_from_the_seed() {
 #[tokio::test]
 async fn expiry_payout_never_pays_owners_more_than_the_root() {
 	let ctx = TestContext::new("server/expiry_payout_never_pays_owners_more_than_the_root").await;
-	// At this feerate the fee cannot come from the payout alone, so nothing
-	// is paid until the watchman is funded.
+	// The payout fee does not cover the payout, so nothing is paid until the
+	// watchman is funded.
 	let srv = ctx.captaind("server").bitcoind(ctx.bitcoind_arc()).no_vtxo_pool()
 		.cfg(|cfg| { cfg.expiry_payouts = true; cfg.vtxo_lifetime = BlockDelta::new(24); })
-		.watchmand_cfg(|cfg| cfg.fee_estimator.fallback_fee_rate_regular = FeeRate::from_sat_per_vb(30).unwrap())
+		.watchmand_cfg(|cfg| {
+			cfg.watchman.expiry_payout_weight_vb = SPONSORED_WEIGHT_VB;
+			cfg.fee_estimator.fallback_fee_rate_regular = FeeRate::from_sat_per_vb(30).unwrap();
+		})
 		.create().await;
 	let (vtxo, script, _) = super::idle_board(&ctx, &srv, "owner", sat(100_000)).await;
 	let root = ctx.bitcoind().await_transaction(vtxo.chain_anchor().txid).await
@@ -115,7 +122,7 @@ async fn expiry_payout_never_pays_owners_more_than_the_root() {
 	assert_eq!(set_payout(decided.payout).await, 1);
 	srv.watchmand().trigger_sweep().await;
 	let (_, payout) = wait_payout(&db, vtxo.id()).await;
-	payout_output(&payout, &script, sat(98_000));
+	payout_output(&payout, &script, sat(100_000) - payout_fee(SPONSORED_WEIGHT_VB, 30));
 }
 
 /// Two roots of one owner that expire at the same height, and the owner's
@@ -176,7 +183,7 @@ async fn expiry_payout_ready_root_does_not_wait_for_a_held_root() {
 			}
 		}
 	}.wait_millis(30_000).await;
-	assert_paid(&ctx, &srv, &payout, &script, sat(98_000)).await;
+	assert_paid(&ctx, &srv, &payout, &script, sat(100_000) - EXPIRY_PAYOUT_FEE).await;
 	async {
 		while current_share(&db, ready.id()).await.unwrap().status != "confirmed" {
 			tokio::time::sleep(poll_interval()).await;
@@ -188,7 +195,7 @@ async fn expiry_payout_ready_root_does_not_wait_for_a_held_root() {
 
 	mine_past(&ctx, &srv, deadline).await;
 	let (_, payout) = wait_payout(&db, htlc.id()).await;
-	payout_output(&payout, &script, sat(98_000));
+	payout_output(&payout, &script, sat(100_000) - EXPIRY_PAYOUT_FEE);
 	let state = db.read(async |t| server::database::htlc_vtxo::get_htlc_vtxo(t, htlc.id()).await)
 		.await.unwrap().unwrap();
 	assert_eq!(state.htlc.resolution(), None, "an expiry payout does not settle the HTLC");
@@ -210,7 +217,7 @@ async fn expiry_payout_fee_is_charged_once_per_root() {
 		let (allocation, payout) = wait_payout(&db, vtxo.id()).await;
 		assert!(payout.input.iter().any(|input| input.previous_output == vtxo.chain_anchor()));
 		assert!(payout.input.iter().all(|input| input.previous_output != other.chain_anchor()));
-		payout_output(&payout, &script, vtxo.amount() - sat(2_000));
+		payout_output(&payout, &script, vtxo.amount() - EXPIRY_PAYOUT_FEE);
 		allocations.push(allocation);
 	}
 	assert_ne!(allocations[0], allocations[1]);
@@ -257,24 +264,27 @@ async fn expiry_payout_error_on_one_root_does_not_stop_the_pass() {
 		}
 	}.wait_millis(30_000).await;
 	assert!(payout.input.iter().all(|input| input.previous_output != broken.chain_anchor()));
-	payout_output(&payout, &script, ready.amount() - sat(2_000));
+	payout_output(&payout, &script, ready.amount() - EXPIRY_PAYOUT_FEE);
 	assert!(input_allocations(&db, broken_root).await.is_empty());
 }
 
 /// One root holds arkoor outputs of four recipients and the change of their
-/// sender. The fee takes a 1,500-sat VTXO whole, and leaves 329, 330 and 331
-/// sats of the others. A remainder below the 330-sat dust limit cannot be
+/// sender. At 10 sat/vB the fee is 2,000 sats: it takes a 1,500-sat VTXO
+/// whole, and leaves 329, 330 and 331 sats of the others. A remainder below the 330-sat dust limit cannot be
 /// paid, so its owner forfeits it. The sender's change is paid in one output
 /// and charged one fee. Every wallet then reports its VTXOs paid or
 /// forfeited, with no new movement.
 #[tokio::test]
 async fn expiry_payout_fee_boundaries_and_one_fee_per_owner() {
 	let ctx = TestContext::new("server/expiry_payout_fee_boundaries_and_one_fee_per_owner").await;
-	let srv = ctx.captaind("server").bitcoind(ctx.bitcoind_arc()).no_vtxo_pool().watchmand().cfg(|cfg| {
+	let srv = ctx.captaind("server").bitcoind(ctx.bitcoind_arc()).no_vtxo_pool().cfg(|cfg| {
 		cfg.expiry_payouts = true;
 		cfg.vtxo_lifetime = BlockDelta::new(40);
 		cfg.vtxo_exit_delta = BlockDelta::new(2);
-	}).create().await;
+	}).watchmand_cfg(|cfg| cfg.fee_estimator.fallback_fee_rate_regular = FeeRate::from_sat_per_vb_u32(10))
+		.create().await;
+	let fee = owner_fee(10);
+	assert_eq!(fee, sat(2_000));
 	let sender = ctx.bark_sdk("sender", &srv).boarded(sat(100_000))
 		.cfg(|cfg| cfg.daemon_manual_sync = true).create().await;
 	sender.stop_daemon_wait().await.unwrap();
@@ -316,19 +326,18 @@ async fn expiry_payout_fee_boundaries_and_one_fee_per_owner() {
 			None => assert!(payout.output.iter().all(|output| output.script_pubkey != script)),
 		}
 		let share = current_share(&db, vtxo.id()).await.unwrap();
-		let fee = if expected.is_some() { sat(2_000) } else { vtxo.amount() };
-		assert_eq!(share.fee, fee);
+		assert_eq!(share.fee, if expected.is_some() { fee } else { vtxo.amount() });
 	}
-	payout_output(&payout, &sender.payout_script(), change_total - sat(2_000));
+	payout_output(&payout, &sender.payout_script(), change_total - fee);
 	let mut change_fee = Amount::ZERO;
 	for vtxo in &change {
 		change_fee += current_share(&db, vtxo.id()).await.unwrap().fee;
 	}
-	assert_eq!(change_fee, sat(2_000), "one fee for all VTXOs of one owner in one root");
+	assert_eq!(change_fee, fee, "one fee for all VTXOs of one owner in one root");
 	let operator = operator_script(&srv);
 	let remainder = payout.output.iter().filter(|output| output.script_pubkey == operator)
 		.map(|output| output.value).sum::<Amount>();
-	assert_eq!(remainder + miner_fee(&ctx, &payout).await, sat(1_500 + 2_329 + 2 * 2_000 + 2_000));
+	assert_eq!(remainder + miner_fee(&ctx, &payout).await, sat(1_500 + 2_329) + fee * 3);
 	mine(&ctx, &srv, 6).await;
 	async {
 		while current_share(&db, change[0].id()).await.unwrap().status != "confirmed" {
@@ -351,7 +360,7 @@ async fn expiry_payout_fee_boundaries_and_one_fee_per_owner() {
 		wallet.sync_expiry_payouts().await.unwrap();
 		for vtxo in vtxos {
 			let state = wallet.get_vtxo_by_id(vtxo.id()).await.unwrap();
-			let expected = if vtxo.amount() < sat(2_000) + dust { ExpiryPayoutState::Forfeited } else { ExpiryPayoutState::Paid };
+			let expected = if vtxo.amount() < fee + dust { ExpiryPayoutState::Forfeited } else { ExpiryPayoutState::Paid };
 			assert_eq!((state.state, state.expiry_payout_state), (VtxoState::Spent, Some(expected)));
 		}
 		assert_eq!(wallet.balance().await.unwrap().total(), Amount::ZERO);
@@ -398,8 +407,8 @@ async fn expiry_payout_pays_each_owner_of_a_round_root() {
 	let operator = operator_script(&srv);
 	assert!(payout.output.iter().all(|out| owners.iter().any(|(_, script)| *script == out.script_pubkey)
 		|| out.script_pubkey == operator));
-	payout_output(&payout, &owners[0].1, sat(198_000));
-	assert_paid(&ctx, &srv, &payout, &owners[1].1, sat(198_000)).await;
+	payout_output(&payout, &owners[0].1, sat(200_000) - EXPIRY_PAYOUT_FEE);
+	assert_paid(&ctx, &srv, &payout, &owners[1].1, sat(200_000) - EXPIRY_PAYOUT_FEE).await;
 }
 
 /// An offboard connector is swept to the operator after its own expiry,

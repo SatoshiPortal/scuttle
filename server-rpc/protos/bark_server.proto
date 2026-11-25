@@ -151,11 +151,19 @@ message FeeSchedule {
 	// The fees of a Lightning payment between two wallets of this server.
 	// Unset charges it lightning_send and lightning_receive.
 	optional IntraArkFees intra_ark = 6;
+	// Expiry payout mode only: the fee of an expiry payout.
+	optional ExpiryPayoutFees expiry_payout = 1000;
 }
 
 message IntraArkFees {
 	LightningSendFees lightning_send = 1;
 	LightningReceiveFees lightning_receive = 2;
+}
+
+// The fee of an expiry payout: the weight multiplied by the feerate of the
+// payout transaction, once for each owner in each expired tree.
+message ExpiryPayoutFees {
+	uint64 weight_vb = 1;
 }
 
 message PpmExpiryFeeEntry {

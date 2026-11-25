@@ -21,6 +21,35 @@ pub struct FeeSchedule {
 	/// like any other.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub intra_ark: Option<IntraArkFees>,
+	/// The fee of an expiry payout. Set only by a server in expiry payout
+	/// mode.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub expiry_payout: Option<ExpiryPayoutFees>,
+}
+
+/// The fee of an expiry payout: when a tree expires, a server in expiry
+/// payout mode pays each owner the value that the owner has in the tree,
+/// minus this fee. The server charges it once for each owner in each tree.
+///
+/// The fee is flat: the weight multiplied by the feerate of the payout
+/// transaction. A wallet can estimate it with a feerate of its own. The
+/// server fixes the fee when it decides the payout.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct ExpiryPayoutFees {
+	/// The weight charged for each payout, in vbytes.
+	pub weight_vb: u64,
+}
+
+/// The weight of [ExpiryPayoutFees] when the server configures none.
+pub const DEFAULT_EXPIRY_PAYOUT_WEIGHT_VB: u64 = 200;
+
+impl ExpiryPayoutFees {
+	/// The fee of one payout at `fee_rate`, rounded up.
+	///
+	/// Returns `None` if the calculation overflows.
+	pub fn calculate(&self, fee_rate: FeeRate) -> Option<Amount> {
+		fee_rate.fee_vb(self.weight_vb)
+	}
 }
 
 /// The Lightning fees of an intra-Ark payment: a payment of an invoice that
@@ -126,6 +155,7 @@ impl Default for FeeSchedule {
 				ppm_expiry_table: table.clone(),
 			},
 			intra_ark: None,
+			expiry_payout: None,
 		}
 	}
 }
@@ -1030,5 +1060,15 @@ mod tests {
 			PpmExpiryFeeEntry { expiry_blocks_threshold: 50, ppm: PpmFeeRate(20) },
 		];
 		assert!(matches!(schedule.validate(), Err(FeeScheduleValidationError::UnsortedPpmFeeTable { .. })));
+	}
+
+	#[test]
+	fn expiry_payout_fee_is_the_weight_at_the_feerate() {
+		let fees = ExpiryPayoutFees { weight_vb: 100 };
+		assert_eq!(fees.calculate(FeeRate::from_sat_per_vb_u32(7)), Some(Amount::from_sat(700)));
+		assert_eq!(fees.calculate(FeeRate::ZERO), Some(Amount::ZERO));
+		// 251 sat/kwu is 1.004 sat/vB: 100.4 sats over 100 vB, rounded up.
+		assert_eq!(fees.calculate(FeeRate::from_sat_per_kwu(251)), Some(Amount::from_sat(101)));
+		assert_eq!(ExpiryPayoutFees { weight_vb: u64::MAX }.calculate(FeeRate::from_sat_per_vb_u32(1)), None);
 	}
 }

@@ -25,6 +25,7 @@ use server::vtxopool::VtxoTarget;
 use server_rpc::protos;
 
 use ark_testing::{btc, sat, Captaind, TestContext};
+use ark_testing::constants::EXPIRY_PAYOUT_FEE;
 use ark_testing::daemon::captaind::ArkClient;
 use ark_testing::daemon::captaind::proxy::ArkRpcProxy;
 use ark_testing::util::{poll_interval, FutureExt};
@@ -217,7 +218,7 @@ async fn expiry_payout_pays_unclaimed_source_of_partial_send() {
 	path.insert(unclaimed.chain_anchor());
 	assert!(payout.input.iter().any(|input| path.contains(&input.previous_output)));
 	assert!(payout.output.iter().all(|output| output.script_pubkey != receiver_script));
-	assert_paid(&ctx, &srv, &payout, &script, sat(98_000)).await;
+	assert_paid(&ctx, &srv, &payout, &script, sat(100_000) - EXPIRY_PAYOUT_FEE).await;
 	for txid in grant_closures(&db, &grants).await.expect("the grants are reclaimed").into_values() {
 		let closure = ctx.bitcoind().await_transaction(txid).await;
 		assert!(closure.output.iter().all(|output| output.script_pubkey != receiver_script));
@@ -318,7 +319,7 @@ async fn expiry_payout_refunds_sender_after_grants_reclaimed() {
 	// The refund is paid with the expired tree of the source.
 	mine_past(&ctx, &srv, BlockHeight::new(source.expiry_height().to_u32() - 40)).await;
 	let payout = mine_until_paid(&ctx, &srv, &db, source.id()).await;
-	assert_paid(&ctx, &srv, &payout, &script, sat(98_000)).await;
+	assert_paid(&ctx, &srv, &payout, &script, sat(100_000) - EXPIRY_PAYOUT_FEE).await;
 	assert_eq!(outputs_to(&ctx, &script, start).len(), 1, "the sender is paid once");
 	assert!(outputs_to(&ctx, &receiver_script, start).is_empty(), "the receiver is never paid");
 	assert!(db.read(async |t| t.get_htlc_settlement_by_payment_hash(hash).await).await.unwrap().is_none());

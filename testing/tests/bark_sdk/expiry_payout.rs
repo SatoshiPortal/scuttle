@@ -29,7 +29,7 @@ use server::database::Db;
 use server_rpc::protos;
 
 use ark_testing::{btc, sat, Captaind, TestContext};
-use ark_testing::constants::{BOARD_CONFIRMATIONS, ROUND_CONFIRMATIONS};
+use ark_testing::constants::{BOARD_CONFIRMATIONS, EXPIRY_PAYOUT_FEE, ROUND_CONFIRMATIONS};
 use ark_testing::daemon::captaind::{ArkClient, MailboxClient};
 use ark_testing::daemon::captaind::proxy::{ArkRpcProxy, ArkRpcProxyServer, MailboxRpcProxy};
 use ark_testing::util::{poll_interval, FutureExt};
@@ -853,8 +853,7 @@ async fn expiry_payout_ends_the_exit_of_a_paid_vtxo() {
 	let vtxo = wallet.vtxos().await.unwrap().remove(0);
 	let anchor = vtxo.vtxo.chain_anchor();
 	let script = wallet.payout_script();
-	// The fee is 1% of 400,000 sats.
-	let amount = sat(396_000);
+	let amount = sat(400_000) - EXPIRY_PAYOUT_FEE;
 
 	// The owner is away, so the watchman pays out the board before the exit
 	// starts.
@@ -913,7 +912,7 @@ async fn expiry_payout_ends_the_exit_of_a_paid_vtxo() {
 	assert_eq!((state.state, state.expiry_payout_state), (VtxoState::Spent, Some(ExpiryPayoutState::Paid)));
 	let reported = wallet.expiry_payout(vtxo.id()).await.unwrap().unwrap();
 	assert_eq!((reported.status, reported.gross, reported.fee, reported.payout),
-		(ExpiryPayoutState::Paid, sat(400_000), sat(4_000), amount));
+		(ExpiryPayoutState::Paid, sat(400_000), EXPIRY_PAYOUT_FEE, amount));
 	assert_eq!(reported.address.script_pubkey(), script);
 	assert!(wallet.vtxos().await.unwrap().is_empty());
 	let error = wallet.refresh_vtxos([vtxo.id()]).await.expect_err("a paid VTXO cannot be refreshed");
@@ -1029,7 +1028,7 @@ async fn expiry_payout_of_unseen_receives_is_recorded_on_sync() {
 	let tip = ctx.generate_blocks(6).await;
 	srv.wait_for_sync_height(tip).await;
 	srv.watchmand().wait_for_sync_height(tip).await;
-	assert_eq!(paid_to(&ctx, &script, start).into_iter().sum::<Amount>(), sat(18_000),
+	assert_eq!(paid_to(&ctx, &script, start).into_iter().sum::<Amount>(), sat(20_000) - EXPIRY_PAYOUT_FEE,
 		"the two receives are charged one fee");
 
 	let returned = ctx.bark_sdk("recipient", &srv).mnemonic(mnemonic).cfg(config).create().await;

@@ -12,7 +12,7 @@ mod sweeps;
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
-use bitcoin::{Amount, BlockHash, Network, OutPoint, ScriptBuf, Transaction, Txid};
+use bitcoin::{Amount, BlockHash, FeeRate, Network, OutPoint, ScriptBuf, Transaction, Txid};
 use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::consensus::deserialize;
 use bitcoin::secp256k1::Keypair;
@@ -21,6 +21,7 @@ use bitcoin_ext::rpc::{BitcoinRpcExt, RpcApi};
 
 use ark::{ProtocolEncoding, Vtxo, VtxoId, VtxoPolicy};
 use ark::arkoor::package::{ArkoorPackageBuilder, ArkoorPackageCosignResponse};
+use ark::fees::{ExpiryPayoutFees, DEFAULT_EXPIRY_PAYOUT_WEIGHT_VB};
 use ark::lightning::PaymentHash;
 use ark::mailbox::MailboxIdentifier;
 use ark::vtxo::Full;
@@ -241,6 +242,22 @@ async fn fund_watchman(ctx: &TestContext, srv: &Captaind, amount: Amount) -> Out
 	let vout = tx.output.iter().position(|out| out.script_pubkey == address.script_pubkey()).unwrap();
 	ctx.generate_blocks(2).await;
 	OutPoint::new(txid, vout as u32)
+}
+
+/// A payout weight below the size of a payout to one owner, 130 vB without
+/// change. Such a payout needs a watchman input.
+const SPONSORED_WEIGHT_VB: u64 = 100;
+
+/// The expiry payout fee of each owner at `weight_vb` when the regular
+/// feerate of the watchman is `sat_per_vb`.
+fn payout_fee(weight_vb: u64, sat_per_vb: u32) -> Amount {
+	ExpiryPayoutFees { weight_vb }.calculate(FeeRate::from_sat_per_vb_u32(sat_per_vb)).unwrap()
+}
+
+/// The expiry payout fee of each owner at the default payout weight when the
+/// regular feerate of the watchman is `sat_per_vb`.
+fn owner_fee(sat_per_vb: u32) -> Amount {
+	payout_fee(DEFAULT_EXPIRY_PAYOUT_WEIGHT_VB, sat_per_vb)
 }
 
 /// The script of the operator's sweep address.
